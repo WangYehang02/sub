@@ -1,3 +1,4 @@
+# Fixed one-step FMGAD: inference uses num_steps=1 in model.sample; sample_steps kept at 1 for clarity.
 dataset: books
 exp_tag: fmgad_books
 ae_alpha: 0.75

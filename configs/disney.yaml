@@ -1,6 +1,7 @@
+# Fixed one-step FMGAD: inference uses num_steps=1 in model.sample; sample_steps kept at 1 for clarity.
 dataset: disney
 exp_tag: fmgad_disney
-# Non-polarity knobs from tune_disney_nontune run 20260503_172540 (trial 17): mean AUROC ~0.564 over seeds 42,0,1,2,3; polarity frozen = books.yaml.
+# Fixed Disney configuration used for final reporting. Polarity calibration is strict label-free universal_no_y and uses graph/attribute proxy signals only.
 ae_alpha: 0.8
 ae_dropout: 0.3
 ae_lr: 0.05

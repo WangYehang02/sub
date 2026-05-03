@@ -7,9 +7,10 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
@@ -49,7 +50,19 @@ REQUIRED_VARIANTS = [
     "wo_guidance",
     "wo_smooth",
     "wo_polarity",
+    "wo_virtual_neighbor",
 ]
+
+
+def _default_model_root() -> Optional[str]:
+    mnt = Path("/mnt/yehang/FMGADfinal_runs/models")
+    try:
+        if mnt.parent.is_dir() and os.access(mnt.parent, os.W_OK):
+            mnt.mkdir(parents=True, exist_ok=True)
+            return str(mnt)
+    except OSError:
+        pass
+    return None
 
 
 def _parse_csv_list(raw: str) -> List[str]:
@@ -58,7 +71,11 @@ def _parse_csv_list(raw: str) -> List[str]:
 
 def _load_yaml(path: Path) -> Dict:
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        txt = f.read()
+    try:
+        return yaml.safe_load(txt) or {}
+    except Exception:
+        return yaml.load(txt, Loader=yaml.Loader) or {}
 
 
 def _save_yaml(path: Path, payload: Dict) -> None:
@@ -138,7 +155,7 @@ def _task_run(
         return
 
     base_cfg = _load_yaml(repo_root / DATASET_CONFIG[dataset])
-    run_tag = str(int(time.time()))
+    run_tag = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:10]}"
     merged_cfg = _build_override(base_cfg, variant, dataset, seed, run_tag)
     _sanity_variant_override(variant, merged_cfg)
     _save_yaml(tmp_cfg, merged_cfg)
@@ -158,6 +175,11 @@ def _task_run(
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     env.setdefault("FMGAD_POLARITY_DEBUG", "0")
+    env["FMGAD_RUN_TAG_SUFFIX"] = f"{variant}_{dataset}_seed{seed}_{run_tag}"
+    if not env.get("FMGAD_MODEL_ROOT"):
+        mr = _default_model_root()
+        if mr:
+            env["FMGAD_MODEL_ROOT"] = mr
 
     with open(out_log, "w", encoding="utf-8") as f:
         p = subprocess.run(
@@ -235,6 +257,12 @@ def _worker(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo-root", type=str, default=".")
+    ap.add_argument(
+        "--result-root",
+        type=str,
+        default=None,
+        help="Absolute path for ablation outputs (default: <repo>/results/ablation)",
+    )
     ap.add_argument("--variants", type=str, default=",".join(REQUIRED_VARIANTS))
     ap.add_argument("--include-optional-virtual-neighbor", action="store_true")
     ap.add_argument("--datasets", type=str, default="books,disney,enron,reddit,weibo")
@@ -245,7 +273,10 @@ def main() -> None:
     args = ap.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
-    result_root = repo_root / "results" / "ablation"
+    if args.result_root:
+        result_root = Path(args.result_root).expanduser().resolve()
+    else:
+        result_root = repo_root / "results" / "ablation"
     result_root.mkdir(parents=True, exist_ok=True)
     errors_log = result_root / "errors.log"
 

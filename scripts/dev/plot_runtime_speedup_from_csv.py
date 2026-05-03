@@ -1,28 +1,15 @@
 #!/usr/bin/env python3
-"""Bar chart: average AUROC drop vs Full FMGAD from ablation_summary.csv."""
+"""Bar chart DiffGAD/FMGAD slowdown from runtime_summary.csv."""
 
 from __future__ import annotations
 
 import argparse
 import csv
-from collections import defaultdict
 from pathlib import Path
-from statistics import mean
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
-
-
-VARIANT_ORDER = [
-    "wo_residual",
-    "wo_proto",
-    "wo_guidance",
-    "wo_smooth",
-    "wo_polarity",
-    "wo_virtual_neighbor",
-]
-SHORT_LABELS = ["w/o Resid.", "w/o Proto.", "w/o Guid.", "w/o Smooth", "w/o Polarity", "w/o VN"]
 
 
 def _paper_style() -> None:
@@ -59,83 +46,82 @@ def _spines_light(ax) -> None:
     ax.spines["bottom"].set_linewidth(0.45)
 
 
-def _avg_auroc_from_csv(csv_path: Path) -> dict:
-    by_v: dict = defaultdict(list)
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            v = row["variant"]
-            by_v[v].append(float(row["auroc_mean"]))
-    return {v: mean(vals) for v, vals in by_v.items() if vals}
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--summary-csv", type=str, required=True, help="ablation_summary.csv")
+    ap.add_argument("--runtime-csv", type=str, required=True)
     ap.add_argument("--out-dir", type=str, required=True)
     args = ap.parse_args()
 
-    csv_path = Path(args.summary_csv).resolve()
+    csv_path = Path(args.runtime_csv).resolve()
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    avgs = _avg_auroc_from_csv(csv_path)
-    if "full_fmgad" not in avgs:
-        raise SystemExit("full_fmgad missing from CSV")
+    rows = list(csv.DictReader(open(csv_path, newline="", encoding="utf-8")))
+    by_m_d = {(r["method"], r["dataset"]): float(r["wall_time_mean_sec"]) for r in rows}
+    order = ["books", "disney", "enron", "reddit", "weibo"]
+    slowdowns = []
+    labels_cap = []
+    for d in order:
+        rf = by_m_d[("fmgad", d)]
+        rd = by_m_d[("diffgad", d)]
+        slowdowns.append(rd / rf if rf > 0 else float("nan"))
+        labels_cap.append(d.capitalize())
 
-    full_avg = avgs["full_fmgad"]
-    variants = []
-    drops = []
-    for v in VARIANT_ORDER:
-        if v not in avgs:
-            raise SystemExit(f"missing variant {v} in CSV")
-        variants.append(v)
-        drops.append(full_avg - avgs[v])
+    avg_ratio = sum(slowdowns) / len(slowdowns)
+    slowdowns.append(avg_ratio)
+    labels_cap.append("Avg")
 
     _paper_style()
-    drops_arr = np.array(drops, dtype=float)
-    polarity_idx = VARIANT_ORDER.index("wo_polarity")
+    datasets = labels_cap
+    slowdowns_arr = np.array(slowdowns, dtype=float)
+    avg_idx = len(datasets) - 1
 
     fig_w, fig_h = 6.5, 3.2
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), layout="constrained")
 
-    n = len(SHORT_LABELS)
-    colors = ["#4C72B0"] * n
-    edgecolors = ["#555555"] * n
-    linewidths = [0.45] * n
-    colors[polarity_idx] = "#3D5A80"
-    edgecolors[polarity_idx] = "#2A2A2A"
-    linewidths[polarity_idx] = 0.95
+    x = np.arange(len(datasets))
+    base_face = "#B89090"
+    base_edge = "#6E6E6E"
+    face = [base_face] * len(datasets)
+    edge = [base_edge] * len(datasets)
+    lw = [0.45] * len(datasets)
+    hatch = [""] * len(datasets)
+    face[avg_idx] = "#A88888"
+    edge[avg_idx] = "#555555"
+    lw[avg_idx] = 0.75
+    hatch[avg_idx] = "///"
 
-    x = np.arange(n)
     bars = ax.bar(
         x,
-        drops_arr,
-        color=colors,
-        edgecolor=edgecolors,
-        linewidth=linewidths,
+        slowdowns_arr,
+        color=face,
+        edgecolor=edge,
+        linewidth=lw,
+        hatch=hatch,
         zorder=2,
     )
 
-    ax.set_ylabel("Avg. AUROC Drop vs Full FMGAD")
+    ax.set_ylabel("Runtime Ratio: DiffGAD / FMGAD (×)")
     ax.set_xticks(x)
-    ax.set_xticklabels(SHORT_LABELS, rotation=30, ha="right")
-    ax.set_ylim(0, max(drops_arr) * 1.12 + 1e-6)
+    ax.set_xticklabels(datasets)
+    ymax = max(slowdowns_arr) * 1.12
+    ax.set_ylim(0, ymax)
     ax.yaxis.grid(True, linestyle="--", which="major", zorder=0)
     ax.set_axisbelow(True)
     _spines_light(ax)
 
-    for rect, val in zip(bars, drops_arr):
+    for rect, val in zip(bars, slowdowns_arr):
         ax.text(
             rect.get_x() + rect.get_width() / 2.0,
-            rect.get_height() + 0.002,
-            f"{val:.4f}",
+            rect.get_height() + ymax * 0.01,
+            f"{val:.2f}",
             ha="center",
             va="bottom",
             fontsize=7.5,
         )
 
-    pdf_path = out_dir / "ablation_drop_auroc.pdf"
-    png_path = out_dir / "ablation_drop_auroc.png"
+    pdf_path = out_dir / "runtime_speedup.pdf"
+    png_path = out_dir / "runtime_speedup.png"
     fig.savefig(pdf_path, format="pdf", bbox_inches="tight")
     fig.savefig(png_path, format="png", dpi=300, bbox_inches="tight")
     plt.close(fig)

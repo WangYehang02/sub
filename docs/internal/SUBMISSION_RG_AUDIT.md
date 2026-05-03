@@ -14,7 +14,7 @@
 |------|------|
 | `model.py` | `ensemble_score` 分支：在 `_apply_score_polarity_adapter` **之后** `y_eval = data.y`，仅用于 `eval_*`、PR 曲线与 F1。 |
 | `model.py` | `sample()`：在极性与分数路径完成后 `y_eval = data.y.bool()`，用于 `eval_*`、调试分支 `FMGAD_POLARITY_DEBUG`、以及最终指标。 |
-| `scripts/dataset_graph_stats.py` | 离线统计脚本读取 `data.y`，不参与训练/推理主路径。 |
+| `scripts/dev/dataset_graph_stats.py` | 离线统计脚本读取 `data.y`，不参与训练/推理主路径。 |
 
 **结论**：训练、推理、分数校准与 `polarity_adapter` 选择路径中**不**读取 `data.y`；`data.y` 仅在上述 **metric computation**（及离线脚本）中出现。
 

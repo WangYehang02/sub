@@ -5,7 +5,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 from statistics import mean, stdev
-from typing import Dict, List
+from typing import Any, Dict, List
 
 
 DATASETS = ["books", "disney", "enron", "reddit", "weibo"]
@@ -169,6 +169,51 @@ def _write_analysis(path: Path, bucket: Dict[str, Dict[str, Dict[str, List[float
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_polarity_audit(path: Path, bucket: Dict[str, Any]) -> None:
+    lines = [
+        "# POLARITY_AND_ABLATION_AUDIT",
+        "",
+        "## Protocol (fixed one-step FMGAD)",
+        "",
+        "- Inference uses **one latent flow step** (`model.sample`: `num_steps = 1`).",
+        "- Config field `sample_steps` is recorded for bookkeeping; training/inference path is fixed-step.",
+        "- **`polarity_adapter: universal_no_y`** on full model; **`smoothgnn_polarity` / `nk_polarity`: false** (no mid-path flip).",
+        "- **`data.y`**: used **only** after final scores are formed → `eval_roc_auc` / `eval_average_precision` / recall@k / PR / F1.",
+        "- No `max(AUC, 1-AUC)` oracle flip in repository code (sanitized in `scripts/run_ablation.py`).",
+        "",
+        "## Ablation variants",
+        "",
+        "| Variant | Change |",
+        "|---------|--------|",
+        "| full_fmgad | baseline YAML + universal_no_y |",
+        "| wo_residual | `residual_scale = 0` |",
+        "| wo_proto | `use_proto = false` |",
+        "| wo_guidance | `weight = 0` |",
+        "| wo_smooth | `use_score_smoothing=false`, `score_smoothing_alpha=0` |",
+        "| wo_polarity | `polarity_adapter = none` |",
+        "| wo_virtual_neighbor | `use_virtual_neighbors = false` |",
+        "",
+        "## Average AUROC / AP per variant (dataset mean → column Avg in LaTeX)",
+        "",
+    ]
+    if "full_fmgad" not in bucket:
+        lines.append("_Full FMGAD missing — run ablation first._")
+    else:
+        for v in VARIANT_ORDER:
+            if v not in bucket:
+                continue
+            auc_means = [_stats(bucket[v][d]["auc"])["mean"] for d in DATASETS]
+            ap_means = [_stats(bucket[v][d]["ap"])["mean"] for d in DATASETS]
+            lines.append(
+                f"- **{VARIANT_LABEL[v]}**: Avg AUROC **{mean(auc_means):.4f}**, Avg AP **{mean(ap_means):.4f}**"
+            )
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("See also `ablation_summary.csv`, `ablation_auc_latex.tex`, `ablation_ap_latex.tex`.")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--result-root", type=str, default="results/ablation")
@@ -181,6 +226,7 @@ def main() -> None:
     (root / "ablation_auc_latex.tex").write_text(_build_metric_table(bucket, "auc"), encoding="utf-8")
     (root / "ablation_ap_latex.tex").write_text(_build_metric_table(bucket, "ap"), encoding="utf-8")
     _write_analysis(root / "ablation_analysis.txt", bucket)
+    _write_polarity_audit(root / "POLARITY_AND_ABLATION_AUDIT.md", bucket)
     print(f"Wrote summaries to: {root}")
 
 

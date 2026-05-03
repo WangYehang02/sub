@@ -95,7 +95,7 @@ def main():
         proto_alpha=cfg.get("proto_alpha", 0.01),
         weight=cfg.get("weight", 1.0),
         residual_scale=float(cfg.get("residual_scale", 10.0)),
-        sample_steps=int(cfg.get("sample_steps", 100)),
+        sample_steps=int(cfg.get("sample_steps", 1)),
         verbose=True,
         use_virtual_neighbors=cfg.get("use_virtual_neighbors", True),
         virtual_degree_threshold=int(cfg.get("virtual_degree_threshold", 5)),

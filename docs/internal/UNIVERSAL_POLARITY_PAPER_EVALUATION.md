@@ -12,7 +12,7 @@
 |----|------|
 | 代码仓库 | `<repository root>` |
 | 环境 | Conda `fmgad` |
-| 极性 | `polarity_adapter: universal`（其余超参来自各数据集 `configs/{dataset}.yaml`，由 `scripts/dev/run_universal_5x5_sweep.py` 合并 universal 字段） |
+| 极性 | `polarity_adapter: universal_no_y`（其余超参来自各数据集 `configs/{dataset}.yaml`，由 `scripts/dev/run_universal_5x5_sweep.py` 合并 universal 字段） |
 | 数据 | PyGOD：`books`, `disney`, `enron`, `reddit`, `weibo` |
 | Seeds | **`42, 0, 1, 2, 3`**（共 25 次独立训练） |
 | 硬件 | 8× GPU 并行，`CUDA_VISIBLE_DEVICES` 轮询 |

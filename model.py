@@ -143,7 +143,7 @@ class ResFlowGAD(BaseTransform):
         lr: float = 0.005,
         wd: float = 0.0,
         weight: float = 1.0,
-        sample_steps: int = 50,
+        sample_steps: int = 1,
         ae_dropout: float = 0.3,
         ae_lr: float = 0.01,
         ae_alpha: float = 0.8,
