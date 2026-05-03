@@ -1,0 +1,45 @@
+# 五数据集通用极性：polarity_adapter: universal（图统计自适应门控 + 弃权时 auto_vote 回退）
+# 使用方式：复制本文件为 dataset 名，仅改首行 dataset / exp_tag，或训练时 --config 指向本文件。
+dataset: books
+exp_tag: universal_polarity_books
+ae_alpha: 0.8
+ae_dropout: 0.3
+ae_lr: 0.005
+flow_t_sampling: logit_normal
+hid_dim: null
+proto_alpha: 0.001
+residual_scale: 20.0
+sample_steps: 50
+use_score_smoothing: true
+use_virtual_neighbors: true
+weight: 1.0
+num_trial: 1
+# 分数上不再叠 SmoothGNN / NK（与 time0501/clean gated 一致）；极性仅由 universal 内部探针完成
+smoothgnn_polarity: false
+nk_polarity: false
+smoothgnn_anchor_k_percent: 0.05
+smoothgnn_anchor_margin: 1.08
+smoothgnn_robust_spearman_threshold: -0.15
+nk_feature_weight: 0.8
+nk_degree_weight: 0.2
+nk_min_flip_gain: 0.035
+polarity_adapter: universal
+polarity_vote_q: 0.1
+polarity_vote_margin: 1
+polarity_min_confidence: 0.18
+polarity_lcc_rho_strong: 0.04
+polarity_deg_rho_strong: 0.04
+polarity_connectivity_rel_gap: 0.02
+lcc_spearman_threshold: -0.05
+polarity_use_local_probe: true
+polarity_use_nk_probe: true
+polarity_use_structural_probe: true
+polarity_gate_tau: 0.05
+polarity_gate_margin: 0.02
+polarity_gate_min_confidence: 0.10
+polarity_gate_topk_percent: 0.05
+polarity_struct_lcc_threshold: 0.04
+polarity_struct_deg_threshold: 0.04
+polarity_struct_density_gap: 0.02
+polarity_autovote_fallback: true
+polarity_verbose: false

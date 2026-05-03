@@ -1,0 +1,3 @@
+# Root requirements shim for open-source users.
+# Primary dependency list is currently maintained in rule2_code/requirements.txt.
+-r rule2_code/requirements.txt

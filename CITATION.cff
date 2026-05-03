@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+title: "FMGAD"
+message: "If you use this software, please cite it using the metadata below."
+type: software
+authors:
+  - name: "FMGAD authors"
+version: "0.1.0"
+date-released: "2026-04-30"
+license: MIT
