@@ -26,7 +26,7 @@ nk_min_flip_gain: 0.035
 polarity_adapter: universal
 polarity_vote_q: 0.1
 polarity_vote_margin: 1
-polarity_min_confidence: 0.18
+polarity_min_confidence: 0.14
 polarity_lcc_rho_strong: 0.04
 polarity_deg_rho_strong: 0.04
 polarity_connectivity_rel_gap: 0.02
@@ -34,9 +34,9 @@ lcc_spearman_threshold: -0.05
 polarity_use_local_probe: true
 polarity_use_nk_probe: true
 polarity_use_structural_probe: true
-polarity_gate_tau: 0.05
-polarity_gate_margin: 0.02
-polarity_gate_min_confidence: 0.10
+polarity_gate_tau: 0.1
+polarity_gate_margin: 0.012
+polarity_gate_min_confidence: 0.06
 polarity_gate_topk_percent: 0.05
 polarity_struct_lcc_threshold: 0.04
 polarity_struct_deg_threshold: 0.04
