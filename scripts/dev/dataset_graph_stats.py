@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-五个 PyGOD 基准图（与 FMGAD 一致）的图结构统计：
-- 异常节点平均度数
-- 全图节点平均度数
-- 异常节点的一阶邻居的平均度数（先对每个异常求其邻居度数的均值，再对异常取平均）
-- 异常节点与其一阶邻居的平均余弦相似度（先对每个异常求与邻居的余弦均值，再对异常取平均）
+Graph statistics for the five PyGOD benchmarks (same as FMGAD):
+- Mean degree of anomaly nodes
+- Mean degree over all nodes
+- Mean degree of 1-hop neighbors of anomalies (per-anomaly neighbor-mean, then mean over anomalies)
+- Mean cosine similarity between each anomaly and its 1-hop neighbors (same aggregation)
 
-支持多进程 + 每进程独占一块 GPU（CUDA_VISIBLE_DEVICES），用于并行跑五个数据集。
+Supports multiprocessing with one GPU per worker (CUDA_VISIBLE_DEVICES) for all five datasets in parallel.
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def analyze_dataset(dataset: str, device: torch.device) -> Dict[str, Any]:
     mean_deg_anom = float(deg[anom].mean().item())
 
     src, dst = edge_index[0], edge_index[1]
-    # 无向一阶邻居：每条 (u,v) 上 u 把 v 当邻居、v 把 u 当邻居
+    # Undirected 1-hop neighbors: each (u,v) contributes v as neighbor of u and u as neighbor of v.
     neigh_deg_sum = torch.zeros(n, device=device, dtype=torch.float32)
     neigh_deg_sum.index_add_(0, src, deg[dst])
     neigh_deg_sum.index_add_(0, dst, deg[src])
@@ -122,25 +122,25 @@ def main_single():
 
     p = argparse.ArgumentParser()
     p.add_argument("--dataset", type=str, required=True, choices=DATASETS)
-    p.add_argument("--gpu", type=str, default=None, help="物理 GPU id，写入 CUDA_VISIBLE_DEVICES")
+    p.add_argument("--gpu", type=str, default=None, help="Physical GPU id written to CUDA_VISIBLE_DEVICES")
     args = p.parse_args()
     if args.gpu is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     dev = _pick_device(os.environ.get("CUDA_VISIBLE_DEVICES"))
     out = analyze_dataset(args.dataset, dev)
-    # 单行 JSON，便于 --parallel 父进程解析（统计信息勿走 stderr）
+    # Single-line JSON for the --parallel parent to parse (stats must not go to stderr).
     print(json.dumps(out, ensure_ascii=False, separators=(",", ":")))
 
 
 def main_parallel():
     import torch
 
-    p = argparse.ArgumentParser(description="多卡并行跑五个数据集图统计")
+    p = argparse.ArgumentParser(description="Multi-GPU parallel graph stats for five datasets")
     p.add_argument(
         "--gpus",
         type=str,
         default=None,
-        help="逗号分隔的 GPU 编号，如 0,1,2,3,4；默认使用 0..min(4,n-1)",
+        help="Comma-separated GPU ids, e.g. 0,1,2,3,4; default 0..min(4,n-1)",
     )
     args = p.parse_args()
     exe = sys.executable
@@ -152,7 +152,7 @@ def main_parallel():
         if n_gpu <= 0:
             gpu_list = [""] * len(DATASETS)
         else:
-            # 五数据集各绑一块物理卡；卡少则轮询，避免多进程抢同一张卡
+            # One physical GPU per dataset when possible; round-robin if fewer GPUs than datasets.
             gpu_list = [str(i % n_gpu) for i in range(len(DATASETS))]
 
     rows: List[Dict[str, Any]] = []
@@ -174,7 +174,7 @@ def main_parallel():
         out_b, err_b = proc.communicate()
         if proc.returncode != 0:
             sys.stderr.write(err_b.decode("utf-8", errors="replace"))
-            raise RuntimeError(f"子进程失败 dataset={ds} rc={proc.returncode}")
+            raise RuntimeError(f"Child failed dataset={ds} rc={proc.returncode}")
         text = out_b.decode("utf-8", errors="replace").strip()
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         parsed = False
@@ -184,7 +184,7 @@ def main_parallel():
                 parsed = True
                 break
         if not parsed:
-            raise RuntimeError(f"无法解析 {ds} 的输出: {text[:500]}")
+            raise RuntimeError(f"Could not parse output for {ds}: {text[:500]}")
 
     keys = [
         "dataset",
@@ -197,7 +197,7 @@ def main_parallel():
         "anomalies_isolated",
     ]
     print("\n" + "=" * 100)
-    print("FMGAD / PyGOD 五数据集图统计（度数=无向合一度，与 utils.compute_node_degree_tensor 一致）")
+    print("FMGAD / PyGOD five-dataset graph stats (degree = undirected sum-deg, same as utils.compute_node_degree_tensor)")
     print("=" * 100)
     hdr = (
         f"{'dataset':10} {'|N|':>8} {'|Y|':>6} {'deg(anom)':>12} {'deg(all)':>12} "
@@ -213,7 +213,7 @@ def main_parallel():
             f"{r['anomalies_isolated']:8d}"
         )
     print("=" * 100)
-    # 同时打印完整 JSON
+    # Also print full JSON
     print(json.dumps(rows, indent=2))
 
 

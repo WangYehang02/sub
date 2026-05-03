@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-五数据集 × 五 seed 并行评测 polarity_adapter: universal。
-以各数据集 configs/{dataset}.yaml 为基底，覆盖 universal 相关字段与 exp_tag。
+Five datasets × five seeds in parallel with polarity_adapter universal_no_y overrides.
+Each job starts from configs/{dataset}.yaml and overlays universal fields and exp_tag.
 """
 from __future__ import annotations
 
@@ -130,10 +130,10 @@ def _one_job(args: Tuple[str, int, str, str, int]) -> Dict[str, Any]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--gpus", type=str, default=None, help="逗号分隔 GPU 编号，默认 0..n-1 轮询")
+    ap.add_argument("--gpus", type=str, default=None, help="Comma-separated GPU ids; default cycles 0..n-1")
     ap.add_argument("--seeds", type=str, default=",".join(map(str, DEFAULT_SEEDS)))
     ap.add_argument("--datasets", type=str, default=",".join(DATASETS))
-    ap.add_argument("--max-workers", type=int, default=None, help="并行进程数，默认同 GPU 数")
+    ap.add_argument("--max-workers", type=int, default=None, help="Parallel workers; default matches GPU list size")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -189,8 +189,8 @@ def main() -> None:
 
     md_path = out_root / f"summary_{run_tag}.md"
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write("# universal 极性 5×5 评测\n\n")
-        f.write(f"汇总: `{summary_path}`\n\n")
+        f.write("# Universal polarity 5×5 sweep\n\n")
+        f.write(f"Summary: `{summary_path}`\n\n")
         f.write("| dataset | seed | AUC | AP | rc | flipped | decision | fallback |\n")
         f.write("|---|---:|---:|---:|---:|---|---|---|\n")
         for r in rows:

@@ -24,6 +24,7 @@ def _one(args: Tuple[str, int, str, str, Path]) -> Dict[str, Any]:
     result_path = out_dir / f"{dataset}_seed{seed}.json"
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    env["FMGAD_RUN_TAG_SUFFIX"] = f"seed{seed}"
     cmd = [
         py_exe,
         str(REPO / "scripts" / "run_single.py"),

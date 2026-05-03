@@ -346,11 +346,11 @@ class ResFlowGAD(BaseTransform):
         )
 
     def _load_dataset(self, dset: str):
-        """PyGOD 内置图异常检测数据集：books / disney / enron / reddit / weibo。"""
+        """PyGOD graph anomaly datasets: books / disney / enron / reddit / weibo."""
         return load_data(dset)
 
     def _ensure_save_dir(self, dset: str):
-        # 默认保存到 cwd/models；可通过环境变量 FMGAD_MODEL_ROOT 重定向到大容量磁盘
+        # Default checkpoints under cwd/models; set FMGAD_MODEL_ROOT to redirect to a large disk.
         model_root = os.environ.get("FMGAD_MODEL_ROOT", os.path.join(os.getcwd(), "models"))
         save_dir = os.path.join(model_root, dset, "full_batch")
         os.makedirs(save_dir, exist_ok=True)
@@ -447,7 +447,7 @@ class ResFlowGAD(BaseTransform):
             save_dir,
             f"ae_drop{self.ae_dropout}_lr{self.ae_lr}_alpha{self.ae_alpha}_hid{self.hid_dim}",
         )
-        # 并发运行时避免多个进程写入同一 checkpoint 文件
+        # Avoid multiple processes writing the same checkpoint path when sharing an exp_tag.
         run_tag = self.exp_tag if self.exp_tag else f"run_{os.getpid()}_{int(time.time() * 1000)}"
         _tag_suffix = os.environ.get("FMGAD_RUN_TAG_SUFFIX", "").strip()
         if _tag_suffix:
@@ -476,7 +476,7 @@ class ResFlowGAD(BaseTransform):
             # z_dim = 2*hid_dim
             z_dim = 2 * self.hid_dim
 
-            # free model: cond_dim=None => 用全0 context
+            # Free-flow model: cond_dim=None => zero context vector.
             velocity_free = MLPFlowMatching(d_in=z_dim, dim_t=512, cond_dim=None).cuda()
             self.dm = FlowMatchingModel(velocity_fn=velocity_free, hid_dim=z_dim).cuda()
             if bool(getattr(self, "profile_efficiency", False)):
@@ -494,7 +494,7 @@ class ResFlowGAD(BaseTransform):
             self.proto = dm_dict["prototype"]  # [hid_dim]
 
             if bool(getattr(self, "use_proto", True)):
-                # proto model: cond_dim = hid_dim（只条件在 h 的原型上）
+                # Proto model: cond_dim = hid_dim (condition on prototype in h-space).
                 velocity_proto = MLPFlowMatching(d_in=z_dim, dim_t=512, cond_dim=self.hid_dim).cuda()
                 self.dm_proto = FlowMatchingModel(velocity_fn=velocity_proto, hid_dim=z_dim).cuda()
                 if bool(getattr(self, "profile_efficiency", False)):
@@ -538,7 +538,7 @@ class ResFlowGAD(BaseTransform):
             dm_f1.append(f1_this)
 
         if getattr(self, "ensemble_score", False) and hasattr(self, "_ensemble_scores") and len(self._ensemble_scores) > 0:
-            # 多 trial 分数取平均，再按平均分数计算一次指标
+            # Average scores across trials, then compute metrics once on the mean score.
             stacked = torch.stack(self._ensemble_scores)  # [num_trial, N]
             mean_scores = stacked.mean(dim=0)  # [N]
             if torch.isnan(mean_scores).any() or torch.isinf(mean_scores).any():

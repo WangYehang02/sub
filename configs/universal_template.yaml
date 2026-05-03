@@ -1,5 +1,5 @@
 # strict label-free universal polarity (universal_no_y): graph/attribute proxy signals + gated fusion; auto_vote only as internal fallback
-# 使用方式：复制本文件为 dataset 名，仅改首行 dataset / exp_tag，或训练时 --config 指向本文件。
+# Usage: copy and rename for a dataset, edit dataset / exp_tag on the first lines, or pass this path via --config.
 dataset: books
 exp_tag: fmgad_universal_template
 ae_alpha: 0.8

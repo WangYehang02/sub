@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-五数据集 × 多 seed：直接使用各 configs/{dataset}.yaml（不在此脚本里改极性超参），
-跑 main_train 并汇总 auc_mean / ap_mean。
+Five datasets × multiple seeds: use configs/{dataset}.yaml as-is (no polarity overrides here),
+run main_train, aggregate auc_mean / ap_mean.
 
-默认 seeds=42,0,1,2,3；结果写入 results/best_yaml_5x5_sweep/<run_tag>/。
+Default seeds 42,0,1,2,3; outputs under results/best_yaml_5x5_sweep/<run_tag>/.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ DATASETS = ("books", "disney", "enron", "reddit", "weibo")
 
 
 def _mean_std(xs: List[float]) -> Tuple[float, float]:
-    """样本均值与样本标准差（n=1 时 std 记为 0）。"""
+    """Sample mean and sample stdev (std is 0 when n=1)."""
     if not xs:
         return float("nan"), float("nan")
     m = float(statistics.mean(xs))
@@ -159,14 +159,14 @@ def _write_summary_artifacts(run_root: Path, run_tag: str, rows: List[Dict[str, 
 
     md_path = run_root / "summary.md"
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write("# Best YAML 五数据集 × seeds AUC / AP（均值 ± 标准差）\n\n")
+        f.write("# Best YAML: five datasets × seeds — AUROC / AP (mean ± std)\n\n")
         f.write(f"- run_tag: `{run_tag}`\n")
-        f.write(f"- 配置来源: `configs/{{dataset}}.yaml`（仅覆盖 `exp_tag`）\n")
+        f.write(f"- Config: `configs/{{dataset}}.yaml` (only `exp_tag` overridden)\n")
         f.write(
-            f"- **全部运行（跨数据集×seed）**: AUROC {g_am:.4f} ± {g_asd:.4f}，"
-            f"AP {g_pm:.4f} ± {g_psd:.4f}（n={len(all_auc)}）\n\n"
+            f"- **All runs (datasets × seeds)**: AUROC {g_am:.4f} ± {g_asd:.4f}, "
+            f"AP {g_pm:.4f} ± {g_psd:.4f} (n={len(all_auc)})\n\n"
         )
-        f.write("## 各数据集（跨 seeds：样本标准差）\n\n")
+        f.write("## Per dataset (across seeds: sample std)\n\n")
         f.write("| dataset | AUC (mean ± std) | AP (mean ± std) | n |\n")
         f.write("|---|---|---|---:|\n")
         for d in sorted(per_dataset.keys()):
@@ -175,7 +175,7 @@ def _write_summary_artifacts(run_root: Path, run_tag: str, rows: List[Dict[str, 
                 f"| {d} | {s['auc_mean']:.4f} ± {s['auc_std']:.4f} | "
                 f"{s['ap_mean']:.4f} ± {s['ap_std']:.4f} | {s['n']} |\n"
             )
-        f.write("\n## 明细\n\n")
+        f.write("\n## Per run\n\n")
         f.write("| dataset | seed | AUC | AP | rc |\n|---|---:|---:|---:|---:|\n")
         for r in rows:
             f.write(
@@ -190,7 +190,7 @@ def main() -> None:
         "--from-summary-json",
         type=str,
         default=None,
-        help="给定已有 run 的 summary.json 路径，仅重算 mean±std 并覆盖同目录 summary.json / summary.md（不重训）。",
+        help="Path to an existing run's summary.json: recompute mean±std only and overwrite summaries (no retrain).",
     )
     ap.add_argument("--seeds", type=str, default="42,0,1,2,3")
     ap.add_argument("--datasets", type=str, default=",".join(DATASETS))

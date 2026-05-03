@@ -12,7 +12,7 @@ from torch_geometric.utils import to_networkx
 
 def compute_node_lcc_tensor(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
     """
-    无向图下每个节点的局部聚类系数 (NetworkX)，shape [N]，CPU float32。
+    Per-node local clustering coefficient on an undirected graph (NetworkX), shape [N], CPU float32.
     """
     import networkx as nx
 
@@ -28,7 +28,7 @@ def compute_node_lcc_tensor(edge_index: torch.Tensor, num_nodes: int) -> torch.T
 
 def compute_node_degree_tensor(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
     """
-    无向图下每个节点度数（行/列无向合一度），shape [N]，与 edge_index 同设备。
+    Per-node undirected degree (sum of in+out on stored edges), shape [N], same device as edge_index.
     """
     n = int(num_nodes)
     dev = edge_index.device
@@ -40,7 +40,7 @@ def compute_node_degree_tensor(edge_index: torch.Tensor, num_nodes: int) -> torc
 
 
 def _linear_flip01_numpy_style(score: torch.Tensor) -> torch.Tensor:
-    """与 calibrate_polarity_lcc_spearman / flip_score 同口径的 [0,1] 线性翻转（张量，带梯度无需求）。"""
+    """Same [0,1] linear flip as calibrate_polarity_lcc_spearman / flip_score (tensor; no grad needed)."""
     with torch.no_grad():
         smin, smax = score.min(), score.max()
         if float(smax - smin) <= 1e-12:
@@ -58,7 +58,7 @@ def _spearman_rho(
 
 
 def _undirected_pair_set(edge_index: np.ndarray, n: int) -> int:
-    """去重后的无向边数（不重复计入双向）。"""
+    """Count of unique undirected edges (bidirectional storage deduped)."""
     seen = set()
     for e in range(edge_index.shape[1]):
         u, v = int(edge_index[0, e]), int(edge_index[1, e])
@@ -73,7 +73,7 @@ def _undirected_pair_set(edge_index: np.ndarray, n: int) -> int:
 def _induced_undirected_unique_in_top(
     edge_index: np.ndarray, top_set: set
 ) -> int:
-    """诱导子图上的无向边数（对 u<v 去重，避免同一条边在双向存储时算两次）。"""
+    """Unique undirected edges in the induced subgraph on top_set (dedupe u<v)."""
     seen = set()
     for e in range(edge_index.shape[1]):
         u, v = int(edge_index[0, e]), int(edge_index[1, e])
@@ -105,9 +105,9 @@ def calibrate_polarity_auto_vote(
     verbose: bool = False,
 ) -> Tuple[torch.Tensor, bool, Dict[str, Any]]:
     """
-    多探针无监督极性「投票」：LCC-Spearman、度-Spearman、top-q 子图边密度与全图比。
-    各探针输出 keep / flip / abstain，仅当 flip 票 >= keep 票 + margin 且总置信度达阈值时做线性翻转。
-    返回: (calibrated_score, did_flip, diagnostics)
+    Multi-probe unsupervised polarity voting: LCC-Spearman, degree-Spearman, top-q induced density vs full graph.
+    Each probe votes keep/flip/abstain; linear flip only if flip votes >= keep votes + margin and confidence passes.
+    Returns: (calibrated_score, did_flip, diagnostics)
     """
     with torch.no_grad():
         diags: Dict[str, Any] = {
@@ -196,7 +196,7 @@ def calibrate_polarity_auto_vote(
             }
         )
 
-        # —— Probe 3: top-q 诱导边密度 相对 全图 ——
+        # --- Probe 3: top-q induced edge density vs full graph ---
         k = max(2, int(q * n))
         order = np.argsort(-score_np)
         top_idx = order[:k]
@@ -205,7 +205,7 @@ def calibrate_polarity_auto_vote(
         m_top = _induced_undirected_unique_in_top(ei_np, top_set)
         dens_top = float(m_top) / (float(n_pairs) + 1e-12)
         d_gap = float(dens_top) - float(dens_full)
-        c3 = min(1.0, abs(d_gap) * 5.0)  # 0~1 量纲
+        c3 = min(1.0, abs(d_gap) * 5.0)  # map to ~[0,1] confidence scale
         v3: str
         if dens_top < float(dens_full) - float(connectivity_rel_gap):
             v3 = "flip"
@@ -264,7 +264,7 @@ def _robust_z_clamped(v: torch.Tensor) -> torch.Tensor:
 
 
 def _degree_neighbor_deviation(deg: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-    """|deg_i - mean_neighbor_deg(i)| / (|mean_neighbor_deg|+1)，与 NK prior 中度不一致项一致。"""
+    """|deg_i - mean_neighbor_deg(i)| / (|mean_neighbor_deg|+1); matches NK prior degree-mismatch term."""
     src, dst = edge_index[0], edge_index[1]
     n = int(deg.numel())
     deg_col = deg.unsqueeze(-1)
@@ -280,8 +280,8 @@ def compute_polarity_graph_signals_unsup(
     q: float = 0.05,
 ) -> Dict[str, float]:
     """
-    严格无标签图级统计：仅用 edge_index、x、度、LCC、特征/度邻居偏差构造 proxy suspicious set，
-    不读取任何 ground-truth anomaly mask。
+    Strictly label-free graph-level stats: build a proxy suspicious set from edge_index, x, degree, LCC,
+    and feature/degree neighbor deviations only — never reads a ground-truth anomaly mask.
     """
     with torch.no_grad():
         ei = edge_index.detach().cpu()
@@ -381,8 +381,8 @@ def _universal_autovote_arbitration(
     flipped_auto_vote: bool,
 ) -> Tuple[bool, Optional[str]]:
     """
-    gated 判 keep 但 auto_vote 判 flip 时，仅用无标签 graph_signals + 结构探针 raw 证据仲裁。
-    禁止依赖 n_anom、标签比例、或任何由 y 导出的量。
+    When gated says keep but auto_vote says flip, arbitrate using only label-free graph_signals
+    plus raw structural probe evidence. Must not use n_anom, label rates, or any quantity derived from y.
     """
     if not flipped_auto_vote:
         return False, None
@@ -398,19 +398,19 @@ def _universal_autovote_arbitration(
     pdeg = float(graph_signals.get("proxy_neigh_deg_ratio", 1.0))
     pcos = float(graph_signals.get("proxy_neigh_feature_cos", 0.5))
 
-    # A') 大图 + 尾度温和 + proxy 子集呈 hub 暴露 + 结构支持
+    # A') Large graph + mild tail + proxy hub exposure + structural support
     if n >= 4000 and md <= 35.0 and p95r < 8.0 and pdeg >= 2.5 and es > 0.06:
         return True, "large_graph_proxyhub_plus_struct"
 
-    # B') 中度区 + 低尾度比 + 结构支持（原 B 条的去标签版）
+    # B') Mid degree band + low tail ratio + structural support (label-free variant of rule B)
     if n >= 6000 and 17.5 <= md <= 38.5 and p95r < 7.5 and es > 0.085:
         return True, "mid_deg_band_plus_struct"
 
-    # C') 强结构 raw
+    # C') Strong raw structural evidence
     if n >= 4000 and md <= 42.0 and es >= 0.22:
         return True, "strong_structural_raw"
 
-    # D') 小图：proxy 子集上邻居余弦偏低（异配 proxy）+ 弱结构证据
+    # D') Small graph: low neighbor cosine on proxy set (heterophilic proxy) + mild structural evidence
     if n <= 300 and n >= 40 and es >= 0.022 and pcos < 0.82:
         return True, "small_graph_proxyhetero_plus_struct"
 
@@ -462,8 +462,8 @@ def compute_local_polarity_evidence(
         if n < 4 or p_np.size != n or np.std(s_np) <= 1e-12:
             return 0.0, {"skipped": True, "reason": "size_or_var"}
         sn, _, _ = _normalize01_score_np(s_np)
-        # 小图上 SmoothGNN 先验常为原始范数，tail median 差可达 O(1e4)，会把 J 与 |E| 撑爆并吸干 softmax；
-        # Spearman 对单调正变换不变，将 prior 线性压到 [0,1] 仅收缩 tail 项量级。
+        # On small graphs SmoothGNN priors can have huge raw scale (tail median gaps ~1e4), blowing up J and softmax;
+        # Spearman is invariant to monotone positive maps; linearly squash prior to [0,1] to tame tail magnitude.
         if n < 300:
             lo, hi = float(np.min(p_np)), float(np.max(p_np))
             span = hi - lo
@@ -581,8 +581,8 @@ def calibrate_polarity_gated(
     evidence_scales: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> Tuple[torch.Tensor, bool, Dict[str, Any]]:
     """
-    多探针证据 + softmax 置信度加权（与 time0501/clean 一致），翻转时使用 FMGAD 统一的 [0,1] 线性翻转。
-    evidence_scales: 各探针对 (E_scale, C_scale)，在聚合前作用于 evidence 与 |evidence|。
+    Multi-probe evidence with softmax confidence weighting (same spirit as time0501/clean); flip uses FMGAD [0,1] linear map.
+    evidence_scales: per-probe (E_scale, C_scale) applied to evidence and |evidence| before aggregation.
     """
     with torch.no_grad():
         diags: Dict[str, Any] = {"mode": "gated", "probe_details": {}}
@@ -717,9 +717,9 @@ def calibrate_polarity_universal(
     autovote_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[torch.Tensor, bool, Dict[str, Any]]:
     """
-    Graph-signal–adaptive gated polarity（通用极性，严格无标签 graph_signals）：
-    根据 proxy_neigh_deg_ratio、proxy_neigh_feature_cos（均由 compute_polarity_graph_signals_unsup 得到）与 n 调整探针尺度与门控阈值；
-    gated 弃权时 auto_vote 回退；gated keep 且 auto_vote flip 时用 _universal_autovote_arbitration（仅无标签信号）仲裁。
+    Graph-signal–adaptive gated polarity (universal path; strictly label-free graph_signals):
+    rescale probes and gate thresholds from proxy_neigh_deg_ratio, proxy_neigh_feature_cos (from compute_polarity_graph_signals_unsup) and n;
+    on gated abstain fall back to auto_vote; on gated keep vs auto_vote flip, arbitrate with _universal_autovote_arbitration (label-free only).
     """
     n = int(graph_signals.get("n", 0))
     hub = float(graph_signals.get("proxy_neigh_deg_ratio", 1.0))
@@ -834,9 +834,9 @@ def calibrate_polarity_lcc_spearman(
     verbose: bool = False,
 ) -> Tuple[torch.Tensor, bool, Dict[str, Any]]:
     """
-    基于 Score 与局部聚类系数 LCC 的 Spearman 秩相关，无监督极性探针。
-    rho < threshold 时对 score 做 [0,1] 线性翻转（与 flip_score 一致）。
-    返回: (score, flipped, diagnostics)
+    Unsupervised polarity probe: Spearman rank correlation between score and local clustering (LCC).
+    If rho < threshold, apply the same [0,1] linear flip as flip_score.
+    Returns: (score, flipped, diagnostics)
     """
     with torch.no_grad():
         diags: Dict[str, Any] = {"mode": "legacy_lcc", "flipped": False, "rho_lcc": None, "legacy_threshold": float(threshold)}

@@ -3,10 +3,10 @@ import torch
 
 def compute_residuals(h: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
     """
-    AnomalyGFM 风格残差：
+    AnomalyGFM-style residual:
       r_i = h_i - mean_{j in N(i)} h_j
 
-    约定 edge_index 为 PyG 格式 [2, E]，消息从 src=edge_index[0] 聚合到 dst=edge_index[1]。
+    edge_index is PyG format [2, E]; messages aggregate from src=edge_index[0] to dst=edge_index[1].
     """
     if h.dim() != 2:
         raise ValueError(f"h should be [N, D], got {tuple(h.shape)}")
@@ -22,7 +22,7 @@ def compute_residuals(h: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor
 
     deg = torch.zeros((n,), device=h.device, dtype=h.dtype)
     deg.index_add_(0, dst, torch.ones_like(dst, dtype=h.dtype))
-    deg = deg.clamp_min(1.0).unsqueeze(1)  # 避免除0；孤立点视为均值=0
+    deg = deg.clamp_min(1.0).unsqueeze(1)  # avoid div-by-zero; isolated nodes treated as zero neighbor mean
 
     neigh_mean = neigh_sum / deg
     return h - neigh_mean
@@ -30,26 +30,26 @@ def compute_residuals(h: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor
 
 def compute_dual_residuals_with_degree(h: torch.Tensor, edge_index: torch.Tensor):
     """
-    计算双重残差（全局+局部）并返回节点度数用于自适应门控。
-    全局残差：节点与全图均值的差异，适合稀疏/低度节点（稳健）。
-    局部残差：节点与邻居均值的差异，适合稠密图上的局部结构异常（敏感）。
-    约定 edge_index 为 PyG 格式 [2, E]，消息从 src=edge_index[0] 聚合到 dst=edge_index[1]。
+    Dual residuals (global + local) and node degree for adaptive gating.
+    Global residual: deviation from the graph-wide mean (robust on sparse / low-degree nodes).
+    Local residual: deviation from neighbor mean (sensitive to local structure on dense graphs).
+    edge_index is PyG [2, E]; aggregate src -> dst.
 
-    返回:
-        r_global: [N, D] 全局统计残差
-        r_local:  [N, D] 局部结构残差
-        deg:      [N, 1] 节点度数（用于后续门控）
+    Returns:
+        r_global: [N, D] global statistical residual
+        r_local:  [N, D] local structural residual
+        deg:      [N, 1] node degree (for gating)
     """
     if h.dim() != 2:
         raise ValueError(f"h should be [N, D], got {tuple(h.shape)}")
     if edge_index.dim() != 2 or edge_index.size(0) != 2:
         raise ValueError(f"edge_index should be [2, E], got {tuple(edge_index.shape)}")
 
-    # 1. 全局残差 (Global Residual)：节点相对全图均值的偏差
+    # 1) Global residual: deviation from graph-wide mean
     global_mean = torch.mean(h, dim=0, keepdim=True)
     r_global = h - global_mean
 
-    # 2. 局部残差 (Local Residual) 与度数
+    # 2) Local residual and degree
     src, dst = edge_index[0], edge_index[1]
     n, d = h.size(0), h.size(1)
     neigh_sum = torch.zeros((n, d), device=h.device, dtype=h.dtype)

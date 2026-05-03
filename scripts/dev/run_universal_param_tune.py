@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-在 seeds × 五数据集 上网格搜索 universal 极性 YAML 超参，目标：最大化 25 次运行的平均 AUROC。
+Grid-search universal polarity YAML knobs over seeds × five datasets; maximize mean AUROC over 25 runs.
 
-注意：排序目标为各次 main_train 写出的 auc_mean，该值由带标签的 eval_roc_auc 计算得到，
-属于「用评测标签做模型/后处理选参」；论文中需与「训练/极性路径无标签」分开披露。
+Note: the ranking objective is auc_mean from main_train, computed with labeled eval_roc_auc — i.e. label-based
+model/post-hoc selection — disclose separately from label-free training / polarity paths in papers.
 
-输出目录：results/universal_param_tune/<run_tag>/trial_XXXX/{dataset}_seed{s}.json
-并行：每个 (trial, dataset, seed) 为独立子进程，按 GPU 轮询分配。
+Outputs: results/universal_param_tune/<run_tag>/trial_XXXX/{dataset}_seed{s}.json
+Parallelism: one subprocess per (trial, dataset, seed), GPUs assigned round-robin.
 """
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ DATASETS = ("books", "disney", "enron", "reddit", "weibo")
 
 def detect_idle_gpus(util_max: int = 10, mem_used_mib_max: int = 1024) -> List[str]:
     """
-    用 nvidia-smi 选出「利用率与已用显存」均低于阈值的 GPU 索引（字符串列表）。
-    失败时返回空列表。
+    Use nvidia-smi to list GPU indices (strings) whose utilization and used memory are below thresholds.
+    Returns [] on failure.
     """
     try:
         r = subprocess.run(
@@ -95,7 +95,7 @@ def _load_yaml(p: Path) -> Dict[str, Any]:
 
 
 def _trial_grid(grid: str) -> List[Dict[str, Any]]:
-    """返回若干组「相对 UNIVERSAL_BASE 的完整 universal 字段字典」。"""
+    """Return full universal-field dicts relative to UNIVERSAL_BASE for each grid point."""
     if grid == "small":
         taus = [0.03, 0.06, 0.10]
         margins = [0.015, 0.035]
@@ -103,7 +103,7 @@ def _trial_grid(grid: str) -> List[Dict[str, Any]]:
         pmins = [0.14, 0.22]
         vqs = [0.10]
     elif grid == "medium":
-        # 54 trials × 25 jobs：tau×margin×gmin × pmin(2)；vote_q 固定为 0.1 控制总时长
+        # 54 trials × 25 jobs: tau×margin×gmin × pmin(2); vote_q fixed at 0.1 to cap runtime
         taus = [0.03, 0.055, 0.10]
         margins = [0.012, 0.025, 0.04]
         gmins = [0.06, 0.10, 0.14]
@@ -205,10 +205,10 @@ def main() -> None:
     ap.add_argument(
         "--idle-gpus-only",
         action="store_true",
-        help="仅用 nvidia-smi 判定的空闲 GPU（见 --idle-gpu-util-max / --idle-gpu-mem-mib-max），忽略 --gpus。",
+        help="Use only idle GPUs from nvidia-smi (see --idle-gpu-util-max / --idle-gpu-mem-mib-max); ignore --gpus.",
     )
-    ap.add_argument("--idle-gpu-util-max", type=int, default=10, help="利用率 %% 不超过该值视为空闲。")
-    ap.add_argument("--idle-gpu-mem-mib-max", type=int, default=1024, help="已用显存 MiB 不超过该值视为空闲。")
+    ap.add_argument("--idle-gpu-util-max", type=int, default=10, help="Treat GPU as idle if utilization %% is at most this.")
+    ap.add_argument("--idle-gpu-mem-mib-max", type=int, default=1024, help="Treat GPU as idle if used memory MiB is at most this.")
     ap.add_argument("--max-workers", type=int, default=8)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
