@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -25,6 +26,14 @@ def _one(args: Tuple[str, int, str, str, Path]) -> Dict[str, Any]:
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     env["FMGAD_RUN_TAG_SUFFIX"] = f"seed{seed}"
+    if not env.get("FMGAD_MODEL_ROOT"):
+        mnt_models = Path("/mnt/yehang/FMGADfinal_runs/models")
+        try:
+            if mnt_models.parent.is_dir() and os.access(mnt_models.parent, os.W_OK):
+                mnt_models.mkdir(parents=True, exist_ok=True)
+                env["FMGAD_MODEL_ROOT"] = str(mnt_models)
+        except OSError:
+            pass
     cmd = [
         py_exe,
         str(REPO / "scripts" / "run_single.py"),
@@ -100,9 +109,32 @@ def main() -> int:
             r = rows[-1]
             print(f"[{k}/{len(jobs)}] {r['dataset']} seed={r['seed']} rc={r['returncode']} auc={r.get('auc_mean')}", flush=True)
 
+    by_ds: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        if r.get("auc_mean") is not None:
+            by_ds[r["dataset"]].append({"seed": r["seed"], "auc_mean": float(r["auc_mean"])})
+    summary_by_dataset: Dict[str, Any] = {}
+    for d in sorted(by_ds.keys()):
+        aucs = [x["auc_mean"] for x in by_ds[d]]
+        summary_by_dataset[d] = {
+            "mean_auc": sum(aucs) / len(aucs),
+            "n_seeds": len(aucs),
+            "per_seed": by_ds[d],
+        }
+
     meta_path = out_dir / "run_meta.json"
     with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump({"n_jobs": len(jobs), "rows": rows}, f, indent=2, ensure_ascii=False)
+        json.dump(
+            {
+                "n_jobs": len(jobs),
+                "config_note": "Each job uses repo configs/<dataset>.yaml via scripts/run_single.py",
+                "summary_by_dataset": summary_by_dataset,
+                "rows": rows,
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
     print("Wrote", meta_path, flush=True)
     return 0 if all(r.get("returncode") == 0 for r in rows) else 1
 

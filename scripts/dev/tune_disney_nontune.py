@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-Disney-only hyperparameter search: maximize mean AUROC over fixed seeds.
-All polarity / legacy flip-related YAML keys are frozen from configs/books.yaml
-(same universal_no_y block as other datasets); only non-polarity knobs are searched.
+Non-polarity hyperparameter search for one dataset (books / enron / disney / reddit): maximize mean AUROC over fixed seeds.
+Polarity / legacy flip-related YAML keys are frozen from configs/books.yaml (same universal_no_y block as Disney sweep);
+only non-polarity knobs are searched.
+
+Examples:
+  python scripts/dev/tune_disney_nontune.py --dataset disney   # legacy default
+  python scripts/dev/tune_disney_nontune.py --dataset books
+  python scripts/dev/tune_disney_nontune.py --dataset enron
+  python scripts/dev/tune_disney_nontune.py --dataset reddit
 """
 from __future__ import annotations
 
 import argparse
 import copy
-import itertools
 import json
 import os
 import random
@@ -22,8 +27,8 @@ from typing import Any, Dict, List, Tuple
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
-DISNEY_BASE = REPO / "configs" / "disney.yaml"
 POLARITY_REF = REPO / "configs" / "books.yaml"
+DATASETS = ("books", "disney", "enron", "reddit")
 
 
 def _resolve_storage_root(explicit: str | None) -> Path:
@@ -57,33 +62,41 @@ def _polarity_block_from_ref(ref: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def _build_cfg(trial_id: int, tune: Dict[str, Any], run_tag: str, polar_frozen: Dict[str, Any]) -> Dict[str, Any]:
-    cfg = _load_yaml(DISNEY_BASE)
-    cfg["dataset"] = "disney"
+def _build_cfg(
+    dataset: str,
+    trial_id: int,
+    tune: Dict[str, Any],
+    run_tag: str,
+    polar_frozen: Dict[str, Any],
+) -> Dict[str, Any]:
+    base_path = REPO / "configs" / f"{dataset}.yaml"
+    cfg = _load_yaml(base_path)
+    cfg["dataset"] = dataset
     for k, v in tune.items():
         cfg[k] = v
     for k, v in polar_frozen.items():
         cfg[k] = v
-    cfg["exp_tag"] = f"disney_tune_t{trial_id:04d}_{run_tag}"
+    cfg["exp_tag"] = f"{dataset}_tune_t{trial_id:04d}_{run_tag}"
     return cfg
 
 
-def _one_job(args: Tuple[int, Dict[str, Any], int, str, str, Path, Dict[str, Any], str]) -> Dict[str, Any]:
-    trial_id, tune, seed, run_tag, gpu, run_root, polar_frozen, model_root = args
+def _one_job(
+    args: Tuple[str, int, Dict[str, Any], int, str, str, Path, Dict[str, Any], str],
+) -> Dict[str, Any]:
+    dataset, trial_id, tune, seed, run_tag, gpu, run_root, polar_frozen, model_root = args
     work = run_root / "_tmp_cfgs"
     work.mkdir(parents=True, exist_ok=True)
     cfg_path = work / f"t{trial_id:04d}_seed{seed}.yaml"
     result_path = run_root / "runs" / f"t{trial_id:04d}_seed{seed}.json"
     result_path.parent.mkdir(parents=True, exist_ok=True)
 
-    cfg = _build_cfg(trial_id, tune, run_tag, polar_frozen)
+    cfg = _build_cfg(dataset, trial_id, tune, run_tag, polar_frozen)
     with open(cfg_path, "w", encoding="utf-8") as f:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     env["FMGAD_MODEL_ROOT"] = model_root
-    # Same exp_tag across seeds would race on proto_dm_self.pt etc.; suffix gives per-seed checkpoint dirs.
     env["FMGAD_RUN_TAG_SUFFIX"] = f"seed{seed}"
     cmd = [
         sys.executable,
@@ -103,6 +116,7 @@ def _one_job(args: Tuple[int, Dict[str, Any], int, str, str, Path, Dict[str, Any
         f.write(p.stdout or "")
 
     row: Dict[str, Any] = {
+        "dataset": dataset,
         "trial_id": trial_id,
         "seed": seed,
         "tune": tune,
@@ -156,6 +170,13 @@ def _random_trials(n: int, rng: random.Random) -> List[Dict[str, Any]]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--dataset",
+        type=str,
+        default="disney",
+        choices=DATASETS,
+        help="Target dataset config (default: disney for backward compatibility)",
+    )
     ap.add_argument("--seeds", type=str, default="42,0,1,2,3", help="Comma-separated seeds (default: 42,0,1,2,3)")
     ap.add_argument("--n-trials", type=int, default=36, help="Number of random search trials (non-polarity)")
     ap.add_argument("--random-seed", type=int, default=0, help="RNG seed for constructing the trial list")
@@ -170,6 +191,7 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
+    dataset = str(args.dataset)
     seeds = [int(x.strip()) for x in args.seeds.split(",") if x.strip()]
     gpu_list = [g.strip() for g in args.gpus.split(",") if g.strip()] or ["0"]
     rng = random.Random(int(args.random_seed))
@@ -178,26 +200,28 @@ def main() -> None:
 
     run_tag = time.strftime("%Y%m%d_%H%M%S")
     storage = _resolve_storage_root(args.output_root)
+    subdir = f"tune_{dataset}_nontune"
     if storage.resolve() == REPO.resolve():
-        run_root = REPO / "results" / "tune_disney_nontune" / run_tag
+        run_root = REPO / "results" / subdir / run_tag
         model_root = str(REPO / "models")
     else:
-        run_root = storage / "tune_disney_nontune" / run_tag
+        run_root = storage / subdir / run_tag
         model_root = str(storage / "models")
     run_root.mkdir(parents=True, exist_ok=True)
 
     with open(run_root / "polarity_frozen_from_books.yaml", "w", encoding="utf-8") as f:
         yaml.dump(polar_frozen, f, default_flow_style=False, allow_unicode=False)
 
-    jobs: List[Tuple[int, Dict[str, Any], int, str, str, Path, Dict[str, Any]]] = []
+    jobs: List[Tuple[str, int, Dict[str, Any], int, str, str, Path, Dict[str, Any], str]] = []
     idx = 0
     for tid, tune in enumerate(tune_list):
         for s in seeds:
             g = gpu_list[idx % len(gpu_list)]
-            jobs.append((tid, tune, s, run_tag, g, run_root, polar_frozen, model_root))
+            jobs.append((dataset, tid, tune, s, run_tag, g, run_root, polar_frozen, model_root))
             idx += 1
 
     meta = {
+        "dataset": dataset,
         "run_tag": run_tag,
         "storage_root": str(storage),
         "model_root": model_root,
@@ -206,6 +230,7 @@ def main() -> None:
         "n_jobs": len(jobs),
         "seeds": seeds,
         "polarity_reference": str(POLARITY_REF),
+        "config_base": str(REPO / "configs" / f"{dataset}.yaml"),
     }
     print(json.dumps(meta, indent=2), flush=True)
 
@@ -272,11 +297,13 @@ def main() -> None:
     with open(run_root / "summary.json", "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, ensure_ascii=False)
 
+    title = dataset.capitalize()
     md = run_root / "summary.md"
     with open(md, "w", encoding="utf-8") as f:
-        f.write("# Disney non-polarity tuning\n\n")
+        f.write(f"# {title} non-polarity tuning\n\n")
         f.write(f"- seeds: `{args.seeds}`\n")
         f.write(f"- polarity frozen from: `{POLARITY_REF}`\n")
+        f.write(f"- config base: `configs/{dataset}.yaml`\n")
         if best and best.get("mean_auc") is not None:
             f.write(f"- **selection**: `{out['best_selection_mode']}` (prefer trials with all {n_seeds} seeds)\n")
             f.write(f"- **best trial_id**: {best['trial_id']}\n")
@@ -289,14 +316,15 @@ def main() -> None:
             f.write(f"| {i} | {s['trial_id']} | {s.get('mean_auc')} | {s['n_ok']} |\n")
 
     if best and best.get("tune"):
-        merged = _load_yaml(DISNEY_BASE)
+        merged = _load_yaml(REPO / "configs" / f"{dataset}.yaml")
         for k, v in best["tune"].items():
             merged[k] = v
         for k, v in polar_frozen.items():
             merged[k] = v
-        merged["dataset"] = "disney"
-        merged["exp_tag"] = "fmgad_disney"
-        with open(run_root / "recommended_disney.yaml", "w", encoding="utf-8") as f:
+        merged["dataset"] = dataset
+        merged["exp_tag"] = f"fmgad_{dataset}"
+        rec_name = f"recommended_{dataset}.yaml"
+        with open(run_root / rec_name, "w", encoding="utf-8") as f:
             yaml.dump(merged, f, default_flow_style=False, allow_unicode=False)
 
     print("Wrote", run_root / "summary.json", md, flush=True)
