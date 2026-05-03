@@ -138,6 +138,7 @@ def main():
         polarity_struct_deg_threshold=float(cfg.get("polarity_struct_deg_threshold", 0.04)),
         polarity_struct_density_gap=float(cfg.get("polarity_struct_density_gap", 0.02)),
         polarity_autovote_fallback=bool(cfg.get("polarity_autovote_fallback", True)),
+        polarity_unsup_proxy_q=float(cfg.get("polarity_unsup_proxy_q", 0.05)),
     )
 
     print("Running on dataset:", dset, "num_trial:", model.num_trial, flush=True)

@@ -32,7 +32,7 @@ from utils import (
     compute_neighbor_knowledge_prior,
     compute_node_lcc_tensor,
     compute_node_degree_tensor,
-    compute_polarity_graph_signals,
+    compute_polarity_graph_signals_unsup,
     robust_zscore,
     robust_unit_interval,
     calibrate_polarity_robust,
@@ -198,6 +198,7 @@ class ResFlowGAD(BaseTransform):
         polarity_struct_deg_threshold: float = 0.04,
         polarity_struct_density_gap: float = 0.02,
         polarity_autovote_fallback: bool = True,
+        polarity_unsup_proxy_q: float = 0.05,
     ):
         self.name = name
         self.num_trial = num_trial
@@ -255,6 +256,7 @@ class ResFlowGAD(BaseTransform):
         self.polarity_struct_deg_threshold = float(polarity_struct_deg_threshold)
         self.polarity_struct_density_gap = float(polarity_struct_density_gap)
         self.polarity_autovote_fallback = bool(polarity_autovote_fallback)
+        self.polarity_unsup_proxy_q = float(polarity_unsup_proxy_q)
         self._smoothgnn_prior = None  # type: Optional[torch.Tensor]
         self._nk_prior = None  # type: Optional[torch.Tensor]
         self._polarity_anchor = None  # type: Optional[torch.Tensor]
@@ -305,7 +307,7 @@ class ResFlowGAD(BaseTransform):
         return score2
 
     def _apply_universal_polarity(self, score: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        if getattr(self, "polarity_adapter", "nk") != "universal":
+        if getattr(self, "polarity_adapter", "nk") not in ("universal", "universal_no_y"):
             return score
         if (
             self._node_lcc is None
@@ -356,7 +358,7 @@ class ResFlowGAD(BaseTransform):
         pa = getattr(self, "polarity_adapter", "nk")
         if pa == "auto_vote":
             return self._apply_rule2_auto_vote_polarity(score, edge_index)
-        if pa == "universal":
+        if pa in ("universal", "universal_no_y"):
             return self._apply_universal_polarity(score, edge_index)
         return score
 
@@ -418,17 +420,17 @@ class ResFlowGAD(BaseTransform):
         self._nk_prior = None
         self._last_universal_diag = None
         _pa = getattr(self, "polarity_adapter", "nk")
-        if _pa in ("auto_vote", "universal"):
+        if _pa in ("auto_vote", "universal", "universal_no_y"):
             self._node_lcc = compute_node_lcc_tensor(data.edge_index.detach().cpu(), data.x.size(0))
             self._node_degree = compute_node_degree_tensor(data.edge_index.detach().cpu(), data.x.size(0))
         else:
             self._node_lcc = None
             self._node_degree = None
-        if _pa == "universal":
-            self._polarity_graph_signals = compute_polarity_graph_signals(
+        if _pa in ("universal", "universal_no_y"):
+            self._polarity_graph_signals = compute_polarity_graph_signals_unsup(
                 data.edge_index.detach().cpu(),
                 data.x.detach().cpu(),
-                data.y.detach().cpu(),
+                q=float(getattr(self, "polarity_unsup_proxy_q", 0.05)),
             )
             if bool(getattr(self, "polarity_use_local_probe", True)):
                 if self.verbose:
@@ -572,14 +574,14 @@ class ResFlowGAD(BaseTransform):
                 mean_scores = torch.nan_to_num(mean_scores, nan=0.0, posinf=0.0, neginf=0.0)
             mean_scores = self._apply_score_polarity_adapter(mean_scores, data.edge_index)
 
-            y_true = data.y
+            y_eval = data.y  # evaluation labels only (after all score / polarity steps)
 
-            pyg_auc = eval_roc_auc(y_true, mean_scores)
-            pyg_ap = eval_average_precision(y_true, mean_scores)
-            pyg_rec = eval_recall_at_k(y_true, mean_scores, int(y_true.sum()))
-            pyg_prec = eval_precision_at_k(y_true, mean_scores, int(y_true.sum()))
+            pyg_auc = eval_roc_auc(y_eval, mean_scores)
+            pyg_ap = eval_average_precision(y_eval, mean_scores)
+            pyg_rec = eval_recall_at_k(y_eval, mean_scores, int(y_eval.sum()))
+            pyg_prec = eval_precision_at_k(y_eval, mean_scores, int(y_eval.sum()))
 
-            y_np = y_true.cpu().numpy()
+            y_np = y_eval.cpu().numpy()
             p, r, _ = precision_recall_curve(y_np, mean_scores.cpu().numpy())
             pyg_auprc = auc(r, p)
             pyg_f1 = 2 * pyg_prec * pyg_rec / (pyg_prec + pyg_rec) if (pyg_prec + pyg_rec) > 0 else 0.0
@@ -886,7 +888,6 @@ class ResFlowGAD(BaseTransform):
 
         x = data.x.cuda().to(torch.float32)
         edge_index = data.edge_index.cuda()
-        y = data.y.bool()
 
         z0, _, _ = self._build_z(x, edge_index)
         z0 = self._normalize_clip(z0)
@@ -935,7 +936,7 @@ class ResFlowGAD(BaseTransform):
             score = _smooth_scores_by_graph(score, edge_index, self.score_smoothing_alpha, score.device)
 
         if (
-            getattr(self, "polarity_adapter", "nk") not in ("auto_vote", "universal")
+            getattr(self, "polarity_adapter", "nk") not in ("auto_vote", "universal", "universal_no_y")
             and getattr(self, "smoothgnn_polarity", False)
             and getattr(self, "_smoothgnn_prior", None) is not None
         ):
@@ -949,7 +950,7 @@ class ResFlowGAD(BaseTransform):
             )
 
         if (
-            getattr(self, "polarity_adapter", "nk") not in ("auto_vote", "universal")
+            getattr(self, "polarity_adapter", "nk") not in ("auto_vote", "universal", "universal_no_y")
             and getattr(self, "nk_polarity", False)
             and getattr(self, "_nk_prior", None) is not None
         ):
@@ -991,6 +992,9 @@ class ResFlowGAD(BaseTransform):
         if not bool(getattr(self, "ensemble_score", False)):
             score = self._apply_score_polarity_adapter(score, edge_index)
 
+        # Ground-truth mask: evaluation / optional debug only (must not affect score path above).
+        y_eval = data.y.bool()
+
         if os.environ.get("FMGAD_POLARITY_DEBUG", "0") == "1":
             raw_cpu = raw_score.detach().cpu()
             final_cpu = score.detach().cpu()
@@ -1015,10 +1019,10 @@ class ResFlowGAD(BaseTransform):
                     float(final_cpu.max()),
                     float(final_cpu.mean()),
                     score_mode,
-                    float(eval_roc_auc(y, raw_cpu)),
-                    float(eval_roc_auc(y, final_cpu)),
-                    float(eval_roc_auc(y, -final_cpu)),
-                    float(eval_roc_auc(y, one_minus)),
+                    float(eval_roc_auc(y_eval, raw_cpu)),
+                    float(eval_roc_auc(y_eval, final_cpu)),
+                    float(eval_roc_auc(y_eval, -final_cpu)),
+                    float(eval_roc_auc(y_eval, one_minus)),
                 ),
                 flush=True,
             )
@@ -1026,11 +1030,11 @@ class ResFlowGAD(BaseTransform):
         scores_cpu = score.detach().cpu()
         if torch.isnan(scores_cpu).any() or torch.isinf(scores_cpu).any():
             scores_cpu = torch.nan_to_num(scores_cpu, nan=0.0, posinf=0.0, neginf=0.0)
-        pyg_auc = eval_roc_auc(y, scores_cpu)
-        pyg_ap = eval_average_precision(y, scores_cpu)
-        pyg_rec = eval_recall_at_k(y, scores_cpu, sum(y))
-        pyg_prec = eval_precision_at_k(y, scores_cpu, sum(y))
-        p, r, _ = precision_recall_curve(y.numpy(), scores_cpu.numpy())
+        pyg_auc = eval_roc_auc(y_eval, scores_cpu)
+        pyg_ap = eval_average_precision(y_eval, scores_cpu)
+        pyg_rec = eval_recall_at_k(y_eval, scores_cpu, int(y_eval.sum()))
+        pyg_prec = eval_precision_at_k(y_eval, scores_cpu, int(y_eval.sum()))
+        p, r, _ = precision_recall_curve(y_eval.numpy(), scores_cpu.numpy())
         pyg_auprc = auc(r, p)
 
         if (pyg_prec + pyg_rec) > 0:

@@ -23,7 +23,8 @@ nk_min_flip_gain: 0.035
 polarity_reg_weight: 0.2
 polarity_reg_target_corr: 0.2
 # universal polarity (grid search trial_36; replaces prior auto_vote block)
-polarity_adapter: universal
+polarity_adapter: universal_no_y
+polarity_unsup_proxy_q: 0.05
 polarity_use_local_probe: true
 polarity_use_nk_probe: true
 polarity_use_structural_probe: true

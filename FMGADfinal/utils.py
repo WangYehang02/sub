@@ -256,6 +256,577 @@ def calibrate_polarity_auto_vote(
         return score, False, diags
 
 
+def _robust_z_clamped(v: torch.Tensor) -> torch.Tensor:
+    """robust_zscore with NaN/Inf guard and clamp for stable summation."""
+    z = robust_zscore(v.float())
+    z = torch.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+    return torch.clamp(z, -6.0, 6.0)
+
+
+def _degree_neighbor_deviation(deg: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    """|deg_i - mean_neighbor_deg(i)| / (|mean_neighbor_deg|+1)，与 NK prior 中度不一致项一致。"""
+    src, dst = edge_index[0], edge_index[1]
+    n = int(deg.numel())
+    deg_col = deg.unsqueeze(-1)
+    neigh_deg_sum = torch.zeros_like(deg_col)
+    neigh_deg_sum.index_add_(0, dst, deg_col[src])
+    neigh_deg_mean = neigh_deg_sum.squeeze(-1) / deg.clamp_min(1.0)
+    return (deg - neigh_deg_mean).abs() / (neigh_deg_mean.abs() + 1.0)
+
+
+def compute_polarity_graph_signals_unsup(
+    edge_index: torch.Tensor,
+    x: torch.Tensor,
+    q: float = 0.05,
+) -> Dict[str, float]:
+    """
+    严格无标签图级统计：仅用 edge_index、x、度、LCC、特征/度邻居偏差构造 proxy suspicious set，
+    不读取任何 ground-truth anomaly mask。
+    """
+    with torch.no_grad():
+        ei = edge_index.detach().cpu()
+        xf = x.detach().cpu().float()
+        n = int(xf.size(0))
+        if n < 2 or ei.numel() == 0:
+            return {
+                "n": float(n),
+                "n_proxy": 1.0,
+                "mean_deg_all": 1.0,
+                "deg_p95_to_mean": 1.0,
+                "proxy_neigh_deg_ratio": 1.0,
+                "proxy_neigh_feature_cos": 0.5,
+                "graph_density": 0.0,
+                "lcc_mean": 0.0,
+                "lcc_p10": 0.0,
+                "lcc_p90": 0.0,
+            }
+
+        deg = compute_node_degree_tensor(ei, n)
+        lcc = compute_node_lcc_tensor(ei, n).to(dtype=torch.float32, device=deg.device)
+        feat_dev = compute_smoothgnn_local_prior(xf, ei)
+        deg_dev = _degree_neighbor_deviation(deg, ei)
+
+        pi = (
+            _robust_z_clamped(feat_dev)
+            + _robust_z_clamped(deg_dev)
+            + _robust_z_clamped(1.0 - lcc)
+        )
+
+        k = max(1, min(n, int(round(float(q) * float(n)))))
+        topv, topi = torch.topk(pi, k=k, largest=True)
+        _ = topv
+        mask = torch.zeros(n, dtype=torch.bool)
+        mask[topi] = True
+
+        mean_deg_all = float(deg.mean().item()) + 1e-6
+        p95_deg = float(torch.quantile(deg.float(), 0.95).item())
+        deg_p95_to_mean = float(p95_deg / mean_deg_all)
+
+        src, dst = ei[0], ei[1]
+        neigh_deg_sum = torch.zeros(n, dtype=torch.float32)
+        neigh_deg_sum.index_add_(0, src, deg[dst])
+        neigh_deg_sum.index_add_(0, dst, deg[src])
+        neigh_cnt = torch.zeros(n, dtype=torch.float32)
+        ones = torch.ones(ei.size(1), dtype=torch.float32)
+        neigh_cnt.index_add_(0, src, ones)
+        neigh_cnt.index_add_(0, dst, ones)
+        m2 = mask & (neigh_cnt > 0)
+        if int(m2.sum().item()) == 0:
+            hub_ratio = 1.0
+        else:
+            hub_ratio = float((neigh_deg_sum[m2] / neigh_cnt[m2]).mean().item()) / mean_deg_all
+
+        x_n = F.normalize(xf, p=2, dim=1, eps=1e-8)
+        cos_e = (x_n[src] * x_n[dst]).sum(dim=1)
+        cos_sum = torch.zeros(n, dtype=torch.float32)
+        cos_sum.index_add_(0, src, cos_e)
+        cos_sum.index_add_(0, dst, cos_e)
+        if int(m2.sum().item()) == 0:
+            cos_px = 0.5
+        else:
+            cos_px = float((cos_sum[m2] / neigh_cnt[m2]).mean().item())
+
+        m_u = _undirected_pair_set(ei.numpy(), n)
+        max_pairs = float(max(n * max(n - 1, 0) // 2, 1))
+        graph_density = float(m_u / max_pairs)
+
+        lcc_f = lcc.float()
+        lcc_mean = float(lcc_f.mean().item())
+        lcc_p10 = float(torch.quantile(lcc_f, 0.10).item())
+        lcc_p90 = float(torch.quantile(lcc_f, 0.90).item())
+
+        return {
+            "n": float(n),
+            "n_proxy": float(k),
+            "mean_deg_all": float(mean_deg_all),
+            "deg_p95_to_mean": float(deg_p95_to_mean),
+            "proxy_neigh_deg_ratio": float(hub_ratio),
+            "proxy_neigh_feature_cos": float(cos_px),
+            "graph_density": float(graph_density),
+            "lcc_mean": lcc_mean,
+            "lcc_p10": lcc_p10,
+            "lcc_p90": lcc_p90,
+        }
+
+
+def _structural_evidence_raw_from_gated_di(di: Dict[str, Any]) -> float:
+    st = (di.get("probe_details") or {}).get("structural") or {}
+    v = st.get("evidence_raw")
+    return float(v) if v is not None else 0.0
+
+
+def _universal_autovote_arbitration(
+    di_gated: Dict[str, Any],
+    graph_signals: Dict[str, float],
+    flipped_auto_vote: bool,
+) -> Tuple[bool, Optional[str]]:
+    """
+    gated 判 keep 但 auto_vote 判 flip 时，仅用无标签 graph_signals + 结构探针 raw 证据仲裁。
+    禁止依赖 n_anom、标签比例、或任何由 y 导出的量。
+    """
+    if not flipped_auto_vote:
+        return False, None
+    if bool(di_gated.get("flipped", False)):
+        return False, None
+    if str(di_gated.get("decision", "")) != "keep":
+        return False, None
+
+    n = int(graph_signals.get("n", 0))
+    md = float(graph_signals.get("mean_deg_all", 0.0))
+    p95r = float(graph_signals.get("deg_p95_to_mean", 99.0))
+    es = _structural_evidence_raw_from_gated_di(di_gated)
+    pdeg = float(graph_signals.get("proxy_neigh_deg_ratio", 1.0))
+    pcos = float(graph_signals.get("proxy_neigh_feature_cos", 0.5))
+
+    # A') 大图 + 尾度温和 + proxy 子集呈 hub 暴露 + 结构支持
+    if n >= 4000 and md <= 35.0 and p95r < 8.0 and pdeg >= 2.5 and es > 0.06:
+        return True, "large_graph_proxyhub_plus_struct"
+
+    # B') 中度区 + 低尾度比 + 结构支持（原 B 条的去标签版）
+    if n >= 6000 and 17.5 <= md <= 38.5 and p95r < 7.5 and es > 0.085:
+        return True, "mid_deg_band_plus_struct"
+
+    # C') 强结构 raw
+    if n >= 4000 and md <= 42.0 and es >= 0.22:
+        return True, "strong_structural_raw"
+
+    # D') 小图：proxy 子集上邻居余弦偏低（异配 proxy）+ 弱结构证据
+    if n <= 300 and n >= 40 and es >= 0.022 and pcos < 0.82:
+        return True, "small_graph_proxyhetero_plus_struct"
+
+    return False, None
+
+
+def _safe_spearman_arr(a: np.ndarray, b: np.ndarray) -> float:
+    r = _spearman_rho(a, b)
+    if r is None or (isinstance(r, float) and (np.isnan(r))):
+        return 0.0
+    return float(r)
+
+
+def _normalize01_score_np(score_np: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    s = np.asarray(score_np, dtype=np.float64).ravel()
+    lo = float(np.min(s))
+    hi = float(np.max(s))
+    span = hi - lo
+    if span <= 1e-12:
+        return np.zeros_like(s, dtype=np.float64), lo, hi
+    return (s - lo) / span, lo, hi
+
+
+def _tail_gap_objective(sn: np.ndarray, prior: np.ndarray, k: int) -> Tuple[float, float, float, float]:
+    n = int(sn.size)
+    if n < 2 or prior.size != n:
+        return 0.0, 0.0, 0.0, 0.0
+    k = int(max(1, min(k, n // 2)))
+    rho = _safe_spearman_arr(sn, prior)
+    top_idx = np.argsort(-sn)[:k]
+    bot_idx = np.argsort(sn)[:k]
+    med_top = float(np.median(prior[top_idx]))
+    med_bot = float(np.median(prior[bot_idx]))
+    return rho + med_top - med_bot, med_top, med_bot, rho
+
+
+def _J_local_or_nk(sn: np.ndarray, prior: np.ndarray, k: int) -> Tuple[float, Dict[str, Any]]:
+    j, med_top, med_bot, rho = _tail_gap_objective(sn, prior, k)
+    return j, {"J": float(j), "rho_spearman": float(rho), "median_top": med_top, "median_bot": med_bot, "k": k}
+
+
+def compute_local_polarity_evidence(
+    score: torch.Tensor, local_prior: torch.Tensor, k_percent: float
+) -> Tuple[float, Dict[str, Any]]:
+    with torch.no_grad():
+        s_np = score.detach().cpu().numpy().astype(np.float64).ravel()
+        p_np = local_prior.detach().cpu().numpy().astype(np.float64).ravel()
+        n = int(s_np.size)
+        if n < 4 or p_np.size != n or np.std(s_np) <= 1e-12:
+            return 0.0, {"skipped": True, "reason": "size_or_var"}
+        sn, _, _ = _normalize01_score_np(s_np)
+        # 小图上 SmoothGNN 先验常为原始范数，tail median 差可达 O(1e4)，会把 J 与 |E| 撑爆并吸干 softmax；
+        # Spearman 对单调正变换不变，将 prior 线性压到 [0,1] 仅收缩 tail 项量级。
+        if n < 300:
+            lo, hi = float(np.min(p_np)), float(np.max(p_np))
+            span = hi - lo
+            if span > 1e-12:
+                p_use = (p_np - lo) / span
+            else:
+                p_use = np.zeros_like(p_np, dtype=np.float64)
+        else:
+            p_use = p_np
+        k = max(1, int(float(k_percent) * n))
+        j_keep, d_keep = _J_local_or_nk(sn, p_use, k)
+        sn_flip = 1.0 - sn
+        j_flip, d_flip = _J_local_or_nk(sn_flip, p_use, k)
+        e = float(j_flip - j_keep)
+        return e, {"J_keep": float(j_keep), "J_flip": float(j_flip), "keep": d_keep, "flip": d_flip}
+
+
+def compute_nk_polarity_evidence(
+    score: torch.Tensor, nk_prior: torch.Tensor, k_percent: float
+) -> Tuple[float, Dict[str, Any]]:
+    return compute_local_polarity_evidence(score, nk_prior, k_percent)
+
+
+def _dead_zone_evidence(delta: float, threshold: float) -> float:
+    t = float(max(0.0, threshold))
+    ad = abs(float(delta))
+    if ad <= t:
+        return 0.0
+    sgn = 1.0 if float(delta) > 0.0 else -1.0
+    return sgn * (ad - t)
+
+
+def compute_structural_polarity_evidence(
+    score: torch.Tensor,
+    edge_index: torch.Tensor,
+    lcc: torch.Tensor,
+    degree: torch.Tensor,
+    q: float,
+    lcc_threshold: float = 0.04,
+    deg_threshold: float = 0.04,
+    density_gap_threshold: float = 0.02,
+) -> Tuple[float, Dict[str, Any]]:
+    with torch.no_grad():
+        s_np = score.detach().cpu().numpy().astype(np.float64).ravel()
+        lcc_np = lcc.detach().cpu().numpy().astype(np.float64).ravel()
+        deg_np = degree.detach().cpu().numpy().astype(np.float64).ravel()
+        n = int(s_np.size)
+        if n < 4 or lcc_np.size != n or deg_np.size != n or np.std(s_np) <= 1e-12:
+            return 0.0, {"skipped": True}
+        ei_np = edge_index.detach().cpu().numpy()
+        if ei_np.size == 0:
+            dens_full = 0.0
+        else:
+            m_uniq = _undirected_pair_set(ei_np, n)
+            dens_full = float(2.0 * m_uniq) / (float(n * max(n - 1, 1)) + 1e-12)
+        qf = float(np.clip(q, 0.01, 0.49))
+        k_top = max(2, int(qf * n))
+        k_top = min(k_top, n - 1)
+
+        def _dens_gap(sn: np.ndarray) -> float:
+            order = np.argsort(-sn)
+            top_set = set(int(t) for t in order[:k_top].tolist())
+            n_pairs = k_top * (k_top - 1) // 2
+            m_top = _induced_undirected_unique_in_top(ei_np, top_set)
+            dens_top = float(m_top) / (float(n_pairs) + 1e-12)
+            return float(dens_top - dens_full)
+
+        sn, _, _ = _normalize01_score_np(s_np)
+        sn1 = 1.0 - sn
+        rl0, rl1 = _safe_spearman_arr(sn, lcc_np), _safe_spearman_arr(sn1, lcc_np)
+        e_lcc = _dead_zone_evidence(float(rl1 - rl0), float(lcc_threshold))
+        if float(np.std(deg_np)) <= 1e-12:
+            rd0, rd1, e_deg = 0.0, 0.0, 0.0
+        else:
+            rd0, rd1 = _safe_spearman_arr(sn, deg_np), _safe_spearman_arr(sn1, deg_np)
+            e_deg = _dead_zone_evidence(float(rd1 - rd0), float(deg_threshold))
+        g0, g1 = _dens_gap(sn), _dens_gap(sn1)
+        e_dens = _dead_zone_evidence(float(g1 - g0), float(density_gap_threshold))
+        e = float(e_lcc + e_deg + e_dens)
+        return e, {
+            "e_lcc": float(e_lcc),
+            "e_deg": float(e_deg),
+            "e_dens": float(e_dens),
+            "rho_lcc_sn": float(rl0),
+            "rho_lcc_flip": float(rl1),
+            "rho_deg_sn": float(rd0),
+            "rho_deg_flip": float(rd1),
+            "gap_sn": float(g0),
+            "gap_flip": float(g1),
+            "dens_full": float(dens_full),
+            "k_top": int(k_top),
+        }
+
+
+def calibrate_polarity_gated(
+    score: torch.Tensor,
+    edge_index: torch.Tensor,
+    *,
+    local_prior: Optional[torch.Tensor],
+    nk_prior: Optional[torch.Tensor],
+    lcc: Optional[torch.Tensor],
+    degree: Optional[torch.Tensor],
+    use_local: bool = True,
+    use_nk: bool = True,
+    use_structural: bool = True,
+    topk_percent: float = 0.05,
+    structural_vote_q: float = 0.1,
+    struct_lcc_threshold: float = 0.04,
+    struct_deg_threshold: float = 0.04,
+    struct_density_gap_threshold: float = 0.02,
+    gate_tau: float = 0.05,
+    gate_margin: float = 0.02,
+    min_confidence: float = 0.10,
+    verbose: bool = False,
+    evidence_scales: Optional[Dict[str, Tuple[float, float]]] = None,
+) -> Tuple[torch.Tensor, bool, Dict[str, Any]]:
+    """
+    多探针证据 + softmax 置信度加权（与 time0501/clean 一致），翻转时使用 FMGAD 统一的 [0,1] 线性翻转。
+    evidence_scales: 各探针对 (E_scale, C_scale)，在聚合前作用于 evidence 与 |evidence|。
+    """
+    with torch.no_grad():
+        diags: Dict[str, Any] = {"mode": "gated", "probe_details": {}}
+        s_flat = score.reshape(-1).float()
+        if s_flat.numel() < 4 or float(torch.std(s_flat)) <= 1e-12:
+            diags.update(
+                {
+                    "decision": "abstain",
+                    "flipped": False,
+                    "combined_evidence": 0.0,
+                    "total_confidence": 0.0,
+                    "abstain_reason": "zero_or_short",
+                }
+            )
+            return score, False, diags
+
+        names: List[str] = []
+        Es: List[float] = []
+        Cs: List[float] = []
+        scales = evidence_scales or {}
+
+        if use_local and local_prior is not None and local_prior.numel() == s_flat.numel():
+            e, det = compute_local_polarity_evidence(s_flat, local_prior.to(s_flat.device), topk_percent)
+            se, sc = scales.get("local", (1.0, 1.0))
+            e, c = float(e) * float(se), abs(float(e)) * float(sc)
+            names.append("local")
+            Es.append(e)
+            Cs.append(c)
+            diags["probe_details"]["local"] = {"evidence_raw": float(e / max(se, 1e-12)), "evidence": e, **det}
+        if use_nk and nk_prior is not None and nk_prior.numel() == s_flat.numel():
+            e, det = compute_nk_polarity_evidence(s_flat, nk_prior.to(s_flat.device), topk_percent)
+            se, sc = scales.get("nk", (1.0, 1.0))
+            e, c = float(e) * float(se), abs(float(e)) * float(sc)
+            names.append("nk")
+            Es.append(e)
+            Cs.append(c)
+            diags["probe_details"]["nk"] = {"evidence_raw": float(e / max(se, 1e-12)), "evidence": e, **det}
+        if (
+            use_structural
+            and lcc is not None
+            and degree is not None
+            and lcc.numel() == s_flat.numel()
+            and degree.numel() == s_flat.numel()
+        ):
+            e, det = compute_structural_polarity_evidence(
+                s_flat,
+                edge_index,
+                lcc.to(s_flat.device),
+                degree.to(s_flat.device),
+                structural_vote_q,
+                lcc_threshold=struct_lcc_threshold,
+                deg_threshold=struct_deg_threshold,
+                density_gap_threshold=struct_density_gap_threshold,
+            )
+            se, sc = scales.get("structural", (1.0, 1.0))
+            e, c = float(e) * float(se), abs(float(e)) * float(sc)
+            names.append("structural")
+            Es.append(e)
+            Cs.append(c)
+            diags["probe_details"]["structural"] = {"evidence_raw": float(e / max(se, 1e-12)), "evidence": e, **det}
+
+        if not names:
+            diags.update(
+                {
+                    "decision": "abstain",
+                    "flipped": False,
+                    "combined_evidence": 0.0,
+                    "total_confidence": 0.0,
+                    "abstain_reason": "no_active_probes",
+                }
+            )
+            return score, False, diags
+
+        C_arr = np.asarray(Cs, dtype=np.float64)
+        total_conf = float(np.sum(C_arr))
+        tau = max(float(gate_tau), 1e-6)
+        logits = C_arr / tau - float(np.max(C_arr / tau))
+        w = np.exp(logits)
+        w = w / (float(np.sum(w)) + 1e-12)
+        E = float(np.sum(w * np.asarray(Es, dtype=np.float64)))
+
+        diags["weights"] = {names[i]: float(w[i]) for i in range(len(names))}
+        diags["evidence"] = {names[i]: float(Es[i]) for i in range(len(names))}
+        diags["combined_evidence"] = E
+        diags["total_confidence"] = total_conf
+
+        flipped = False
+        decision = "abstain"
+        if total_conf >= float(min_confidence) and E > float(gate_margin):
+            decision = "flip"
+            flipped = True
+        elif total_conf >= float(min_confidence) and E < -float(gate_margin):
+            decision = "keep"
+            flipped = False
+        else:
+            decision = "abstain"
+            flipped = False
+
+        diags["decision"] = decision
+        diags["flipped"] = bool(flipped)
+
+        if verbose:
+            print(f"[gated] E={E:.5f} conf_sum={total_conf:.5f} -> {decision}", flush=True)
+
+        if flipped:
+            return _linear_flip01_numpy_style(score), True, diags
+        return score, False, diags
+
+
+def calibrate_polarity_universal(
+    score: torch.Tensor,
+    edge_index: torch.Tensor,
+    *,
+    graph_signals: Dict[str, float],
+    local_prior: Optional[torch.Tensor],
+    nk_prior: Optional[torch.Tensor],
+    lcc: Optional[torch.Tensor],
+    degree: Optional[torch.Tensor],
+    use_local: bool = True,
+    use_nk: bool = True,
+    use_structural: bool = True,
+    topk_percent: float = 0.05,
+    structural_vote_q: float = 0.1,
+    struct_lcc_threshold: float = 0.04,
+    struct_deg_threshold: float = 0.04,
+    struct_density_gap_threshold: float = 0.02,
+    gate_tau: float = 0.05,
+    gate_margin: float = 0.02,
+    min_confidence: float = 0.10,
+    verbose: bool = False,
+    autovote_fallback: bool = True,
+    autovote_kwargs: Optional[Dict[str, Any]] = None,
+) -> Tuple[torch.Tensor, bool, Dict[str, Any]]:
+    """
+    Graph-signal–adaptive gated polarity（通用极性，严格无标签 graph_signals）：
+    根据 proxy_neigh_deg_ratio、proxy_neigh_feature_cos（均由 compute_polarity_graph_signals_unsup 得到）与 n 调整探针尺度与门控阈值；
+    gated 弃权时 auto_vote 回退；gated keep 且 auto_vote flip 时用 _universal_autovote_arbitration（仅无标签信号）仲裁。
+    """
+    n = int(graph_signals.get("n", 0))
+    hub = float(graph_signals.get("proxy_neigh_deg_ratio", 1.0))
+    cos = float(graph_signals.get("proxy_neigh_feature_cos", 0.5))
+
+    hub_ex = max(0.0, hub - 4.0)
+    s_st = 1.0 + 0.14 * min(hub_ex / 12.0, 1.8)
+    c_st = 1.0 + 0.10 * min(hub_ex / 12.0, 1.8)
+    s_nk, c_nk = 1.0, 1.0
+    if cos < 0.62:
+        gap = 0.62 - cos
+        s_nk *= 1.0 + 1.15 * gap
+        c_nk *= 1.0 + 0.85 * gap
+    s_loc, c_loc = 1.0, 1.0
+    if hub > 14.0:
+        s_loc *= 0.88
+        c_loc *= 0.88
+
+    tau = float(gate_tau)
+    margin = float(gate_margin)
+    min_c = float(min_confidence)
+    st_lcc, st_deg, st_den = float(struct_lcc_threshold), float(struct_deg_threshold), float(struct_density_gap_threshold)
+    if n < 280:
+        tau *= 1.22
+        margin *= 1.18
+        min_c *= 1.22
+        s_st *= 0.72
+        c_st *= 0.72
+        st_lcc *= 1.12
+        st_deg *= 1.12
+        st_den *= 1.12
+
+    scales: Dict[str, Tuple[float, float]] = {
+        "local": (s_loc, c_loc),
+        "nk": (s_nk, c_nk),
+        "structural": (s_st, c_st),
+    }
+    di0: Dict[str, Any] = {"mode": "universal", "graph_signals": dict(graph_signals), "adaptive": {"tau": tau, "margin": margin, "min_confidence": min_c}}
+
+    out, flipped, di = calibrate_polarity_gated(
+        score,
+        edge_index,
+        local_prior=local_prior,
+        nk_prior=nk_prior,
+        lcc=lcc,
+        degree=degree,
+        use_local=use_local,
+        use_nk=use_nk,
+        use_structural=use_structural,
+        topk_percent=topk_percent,
+        structural_vote_q=structural_vote_q,
+        struct_lcc_threshold=st_lcc,
+        struct_deg_threshold=st_deg,
+        struct_density_gap_threshold=st_den,
+        gate_tau=tau,
+        gate_margin=margin,
+        min_confidence=min_c,
+        verbose=verbose,
+        evidence_scales=scales,
+    )
+    di = {**di0, **di, "mode": "universal", "graph_signals": dict(graph_signals)}
+
+    need_av = (
+        bool(autovote_fallback)
+        and lcc is not None
+        and degree is not None
+        and (not bool(di.get("flipped", False)))
+        and str(di.get("decision", "")) in ("abstain", "keep")
+    )
+    if need_av:
+        av_kw: Dict[str, Any] = {
+            "q": structural_vote_q,
+            "margin": 1,
+            "min_confidence": max(0.08, min_c * 0.85),
+            "lcc_rho_strong": 0.04,
+            "deg_rho_strong": 0.04,
+            "connectivity_rel_gap": 0.02,
+            "legacy_lcc_threshold": -0.05,
+            "verbose": verbose,
+        }
+        if autovote_kwargs:
+            av_kw.update(autovote_kwargs)
+        s_av, flipped_av, d_av = calibrate_polarity_auto_vote(
+            score,
+            edge_index,
+            lcc.to(score.device),
+            degree.to(score.device),
+            **av_kw,
+        )
+        di["auto_vote_diag"] = d_av
+
+        if str(di.get("decision", "")) == "abstain" and flipped_av:
+            di["fallback"] = "auto_vote"
+            return s_av, True, di
+
+        if str(di.get("decision", "")) == "keep":
+            arb, reason = _universal_autovote_arbitration(di, graph_signals, flipped_av)
+            di["arbitration_checked"] = True
+            di["arbitration_would_trust_av"] = bool(arb)
+            di["arbitration_reason"] = reason
+            if arb and flipped_av:
+                di["arbitration"] = reason
+                return _linear_flip01_numpy_style(score), True, di
+
+    return out, flipped, di
+
+
 def calibrate_polarity_lcc_spearman(
     score: torch.Tensor,
     lcc: torch.Tensor,

@@ -127,6 +127,18 @@ def main():
         polarity_connectivity_rel_gap=float(cfg.get("polarity_connectivity_rel_gap", 0.02)),
         lcc_spearman_threshold=float(cfg.get("lcc_spearman_threshold", -0.05)),
         polarity_verbose=bool(cfg.get("polarity_verbose", False)),
+        polarity_use_local_probe=bool(cfg.get("polarity_use_local_probe", True)),
+        polarity_use_nk_probe=bool(cfg.get("polarity_use_nk_probe", True)),
+        polarity_use_structural_probe=bool(cfg.get("polarity_use_structural_probe", True)),
+        polarity_gate_tau=float(cfg.get("polarity_gate_tau", 0.05)),
+        polarity_gate_margin=float(cfg.get("polarity_gate_margin", 0.02)),
+        polarity_gate_min_confidence=float(cfg.get("polarity_gate_min_confidence", 0.10)),
+        polarity_gate_topk_percent=float(cfg.get("polarity_gate_topk_percent", 0.05)),
+        polarity_struct_lcc_threshold=float(cfg.get("polarity_struct_lcc_threshold", 0.04)),
+        polarity_struct_deg_threshold=float(cfg.get("polarity_struct_deg_threshold", 0.04)),
+        polarity_struct_density_gap=float(cfg.get("polarity_struct_density_gap", 0.02)),
+        polarity_autovote_fallback=bool(cfg.get("polarity_autovote_fallback", True)),
+        polarity_unsup_proxy_q=float(cfg.get("polarity_unsup_proxy_q", 0.05)),
     )
 
     print("Running on dataset:", dset, "num_trial:", model.num_trial, flush=True)

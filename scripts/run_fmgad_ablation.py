@@ -105,8 +105,8 @@ def _sanity_variant_override(variant: str, cfg: Dict) -> None:
     if variant == "wo_polarity":
         if bool(cfg.get("nk_polarity", True)) or bool(cfg.get("smoothgnn_polarity", True)):
             raise RuntimeError("wo_polarity: polarity flags must be disabled")
-        if str(cfg.get("polarity_adapter", "nk")) in ("auto_vote", "universal"):
-            raise RuntimeError("wo_polarity: polarity_adapter cannot be auto_vote or universal")
+        if str(cfg.get("polarity_adapter", "nk")) in ("auto_vote", "universal", "universal_no_y"):
+            raise RuntimeError("wo_polarity: polarity_adapter cannot be auto_vote or universal / universal_no_y")
 
     if variant == "wo_proto" and bool(cfg.get("use_proto", True)):
         raise RuntimeError("wo_proto: use_proto must be False")

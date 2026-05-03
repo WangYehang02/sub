@@ -32,11 +32,13 @@ from utils import (
     compute_neighbor_knowledge_prior,
     compute_node_lcc_tensor,
     compute_node_degree_tensor,
+    compute_polarity_graph_signals_unsup,
     robust_zscore,
     robust_unit_interval,
     calibrate_polarity_robust,
     calibrate_polarity_with_neighbor_knowledge,
     calibrate_polarity_auto_vote,
+    calibrate_polarity_universal,
 )
 from flow_matching_model import MLPFlowMatching, FlowMatchingModel, sample_flow_matching, sample_flow_matching_free
 from FMloss import flow_matching_loss, conditional_flow_matching_loss
@@ -185,6 +187,18 @@ class ResFlowGAD(BaseTransform):
         polarity_connectivity_rel_gap: float = 0.02,
         lcc_spearman_threshold: float = -0.05,
         polarity_verbose: bool = False,
+        polarity_use_local_probe: bool = True,
+        polarity_use_nk_probe: bool = True,
+        polarity_use_structural_probe: bool = True,
+        polarity_gate_tau: float = 0.05,
+        polarity_gate_margin: float = 0.02,
+        polarity_gate_min_confidence: float = 0.10,
+        polarity_gate_topk_percent: float = 0.05,
+        polarity_struct_lcc_threshold: float = 0.04,
+        polarity_struct_deg_threshold: float = 0.04,
+        polarity_struct_density_gap: float = 0.02,
+        polarity_autovote_fallback: bool = True,
+        polarity_unsup_proxy_q: float = 0.05,
     ):
         self.name = name
         self.num_trial = num_trial
@@ -231,12 +245,28 @@ class ResFlowGAD(BaseTransform):
         self.polarity_connectivity_rel_gap = float(polarity_connectivity_rel_gap)
         self.lcc_spearman_threshold = float(lcc_spearman_threshold)
         self.polarity_verbose = bool(polarity_verbose)
+        self.polarity_use_local_probe = bool(polarity_use_local_probe)
+        self.polarity_use_nk_probe = bool(polarity_use_nk_probe)
+        self.polarity_use_structural_probe = bool(polarity_use_structural_probe)
+        self.polarity_gate_tau = float(polarity_gate_tau)
+        self.polarity_gate_margin = float(polarity_gate_margin)
+        self.polarity_gate_min_confidence = float(polarity_gate_min_confidence)
+        self.polarity_gate_topk_percent = float(polarity_gate_topk_percent)
+        self.polarity_struct_lcc_threshold = float(polarity_struct_lcc_threshold)
+        self.polarity_struct_deg_threshold = float(polarity_struct_deg_threshold)
+        self.polarity_struct_density_gap = float(polarity_struct_density_gap)
+        self.polarity_autovote_fallback = bool(polarity_autovote_fallback)
+        self.polarity_unsup_proxy_q = float(polarity_unsup_proxy_q)
         self._smoothgnn_prior = None  # type: Optional[torch.Tensor]
         self._nk_prior = None  # type: Optional[torch.Tensor]
         self._polarity_anchor = None  # type: Optional[torch.Tensor]
         self._node_lcc = None
         self._node_degree = None
         self._last_auto_vote_diag = None
+        self._polarity_graph_signals = None  # type: Optional[Dict[str, Any]]
+        self._gated_local_prior = None  # type: Optional[torch.Tensor]
+        self._gated_nk_prior = None  # type: Optional[torch.Tensor]
+        self._last_universal_diag = None
 
         self.ae_dropout = ae_dropout
         self.ae_lr = ae_lr
@@ -275,6 +305,62 @@ class ResFlowGAD(BaseTransform):
         )
         self._last_auto_vote_diag = diag
         return score2
+
+    def _apply_universal_polarity(self, score: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "polarity_adapter", "nk") not in ("universal", "universal_no_y"):
+            return score
+        if (
+            self._node_lcc is None
+            or self._node_degree is None
+            or self._polarity_graph_signals is None
+        ):
+            if self.polarity_verbose:
+                print("[universal] missing cache or graph signals, keep score.", flush=True)
+            return score
+        lp = self._gated_local_prior if getattr(self, "polarity_use_local_probe", True) else None
+        nk = self._gated_nk_prior if getattr(self, "polarity_use_nk_probe", True) else None
+        score2, _flipped, diag = calibrate_polarity_universal(
+            score,
+            edge_index,
+            graph_signals=self._polarity_graph_signals,
+            local_prior=lp,
+            nk_prior=nk,
+            lcc=self._node_lcc.to(score.device),
+            degree=self._node_degree.to(score.device),
+            use_local=bool(getattr(self, "polarity_use_local_probe", True)),
+            use_nk=bool(getattr(self, "polarity_use_nk_probe", True)),
+            use_structural=bool(getattr(self, "polarity_use_structural_probe", True)),
+            topk_percent=float(getattr(self, "polarity_gate_topk_percent", 0.05)),
+            structural_vote_q=float(self.polarity_vote_q),
+            struct_lcc_threshold=float(self.polarity_struct_lcc_threshold),
+            struct_deg_threshold=float(self.polarity_struct_deg_threshold),
+            struct_density_gap_threshold=float(self.polarity_struct_density_gap),
+            gate_tau=float(self.polarity_gate_tau),
+            gate_margin=float(self.polarity_gate_margin),
+            min_confidence=float(self.polarity_gate_min_confidence),
+            verbose=bool(self.polarity_verbose),
+            autovote_fallback=bool(getattr(self, "polarity_autovote_fallback", True)),
+            autovote_kwargs={
+                "q": float(self.polarity_vote_q),
+                "margin": int(self.polarity_vote_margin),
+                "min_confidence": float(self.polarity_min_confidence),
+                "lcc_rho_strong": float(self.polarity_lcc_rho_strong),
+                "deg_rho_strong": float(self.polarity_deg_rho_strong),
+                "connectivity_rel_gap": float(self.polarity_connectivity_rel_gap),
+                "legacy_lcc_threshold": float(self.lcc_spearman_threshold),
+                "verbose": bool(self.polarity_verbose),
+            },
+        )
+        self._last_universal_diag = diag
+        return score2
+
+    def _apply_score_polarity_adapter(self, score: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        pa = getattr(self, "polarity_adapter", "nk")
+        if pa == "auto_vote":
+            return self._apply_rule2_auto_vote_polarity(score, edge_index)
+        if pa in ("universal", "universal_no_y"):
+            return self._apply_universal_polarity(score, edge_index)
+        return score
 
     def _load_dataset(self, dset: str):
         """PyGOD 内置图异常检测数据集：books / disney / enron / reddit / weibo。"""
@@ -332,12 +418,41 @@ class ResFlowGAD(BaseTransform):
         self._last_auto_vote_diag = None
         self._smoothgnn_prior = None
         self._nk_prior = None
-        if getattr(self, "polarity_adapter", "nk") == "auto_vote":
+        self._last_universal_diag = None
+        _pa = getattr(self, "polarity_adapter", "nk")
+        if _pa in ("auto_vote", "universal", "universal_no_y"):
             self._node_lcc = compute_node_lcc_tensor(data.edge_index.detach().cpu(), data.x.size(0))
             self._node_degree = compute_node_degree_tensor(data.edge_index.detach().cpu(), data.x.size(0))
         else:
             self._node_lcc = None
             self._node_degree = None
+        if _pa in ("universal", "universal_no_y"):
+            self._polarity_graph_signals = compute_polarity_graph_signals_unsup(
+                data.edge_index.detach().cpu(),
+                data.x.detach().cpu(),
+                q=float(getattr(self, "polarity_unsup_proxy_q", 0.05)),
+            )
+            if bool(getattr(self, "polarity_use_local_probe", True)):
+                if self.verbose:
+                    print("Precomputing universal local prior (SmoothGNN-style)...", flush=True)
+                self._gated_local_prior = compute_smoothgnn_local_prior(data.x.cpu(), data.edge_index.cpu())
+            else:
+                self._gated_local_prior = None
+            if bool(getattr(self, "polarity_use_nk_probe", True)):
+                if self.verbose:
+                    print("Precomputing universal neighbor-knowledge prior...", flush=True)
+                self._gated_nk_prior = compute_neighbor_knowledge_prior(
+                    data.x.cpu(),
+                    data.edge_index.cpu(),
+                    feature_weight=float(getattr(self, "nk_feature_weight", 0.8)),
+                    degree_weight=float(getattr(self, "nk_degree_weight", 0.2)),
+                )
+            else:
+                self._gated_nk_prior = None
+        else:
+            self._polarity_graph_signals = None
+            self._gated_local_prior = None
+            self._gated_nk_prior = None
         if getattr(self, "smoothgnn_polarity", False):
             if self.verbose:
                 print("Precomputing local smoothness prior (||x - mean(neighbors)||)...", flush=True)
@@ -457,16 +572,16 @@ class ResFlowGAD(BaseTransform):
             mean_scores = stacked.mean(dim=0)  # [N]
             if torch.isnan(mean_scores).any() or torch.isinf(mean_scores).any():
                 mean_scores = torch.nan_to_num(mean_scores, nan=0.0, posinf=0.0, neginf=0.0)
-            mean_scores = self._apply_rule2_auto_vote_polarity(mean_scores, data.edge_index)
+            mean_scores = self._apply_score_polarity_adapter(mean_scores, data.edge_index)
 
-            y_true = data.y
+            y_eval = data.y  # evaluation labels only (after all score / polarity steps)
 
-            pyg_auc = eval_roc_auc(y_true, mean_scores)
-            pyg_ap = eval_average_precision(y_true, mean_scores)
-            pyg_rec = eval_recall_at_k(y_true, mean_scores, int(y_true.sum()))
-            pyg_prec = eval_precision_at_k(y_true, mean_scores, int(y_true.sum()))
+            pyg_auc = eval_roc_auc(y_eval, mean_scores)
+            pyg_ap = eval_average_precision(y_eval, mean_scores)
+            pyg_rec = eval_recall_at_k(y_eval, mean_scores, int(y_eval.sum()))
+            pyg_prec = eval_precision_at_k(y_eval, mean_scores, int(y_eval.sum()))
 
-            y_np = y_true.cpu().numpy()
+            y_np = y_eval.cpu().numpy()
             p, r, _ = precision_recall_curve(y_np, mean_scores.cpu().numpy())
             pyg_auprc = auc(r, p)
             pyg_f1 = 2 * pyg_prec * pyg_rec / (pyg_prec + pyg_rec) if (pyg_prec + pyg_rec) > 0 else 0.0
@@ -534,6 +649,8 @@ class ResFlowGAD(BaseTransform):
             "f1_std": float(torch.std(dm_f1)),
             "polarity_adapter": self.polarity_adapter,
             "auto_vote_diagnostics": self._last_auto_vote_diag,
+            "universal_polarity_diagnostics": self._last_universal_diag,
+            "polarity_graph_signals": self._polarity_graph_signals,
         }
         if bool(getattr(self, "profile_efficiency", False)):
             out.update(
@@ -771,7 +888,6 @@ class ResFlowGAD(BaseTransform):
 
         x = data.x.cuda().to(torch.float32)
         edge_index = data.edge_index.cuda()
-        y = data.y.bool()
 
         z0, _, _ = self._build_z(x, edge_index)
         z0 = self._normalize_clip(z0)
@@ -820,7 +936,7 @@ class ResFlowGAD(BaseTransform):
             score = _smooth_scores_by_graph(score, edge_index, self.score_smoothing_alpha, score.device)
 
         if (
-            getattr(self, "polarity_adapter", "nk") != "auto_vote"
+            getattr(self, "polarity_adapter", "nk") not in ("auto_vote", "universal", "universal_no_y")
             and getattr(self, "smoothgnn_polarity", False)
             and getattr(self, "_smoothgnn_prior", None) is not None
         ):
@@ -834,7 +950,7 @@ class ResFlowGAD(BaseTransform):
             )
 
         if (
-            getattr(self, "polarity_adapter", "nk") != "auto_vote"
+            getattr(self, "polarity_adapter", "nk") not in ("auto_vote", "universal", "universal_no_y")
             and getattr(self, "nk_polarity", False)
             and getattr(self, "_nk_prior", None) is not None
         ):
@@ -874,7 +990,10 @@ class ResFlowGAD(BaseTransform):
             score = anchor + beta * raw_term.abs()
 
         if not bool(getattr(self, "ensemble_score", False)):
-            score = self._apply_rule2_auto_vote_polarity(score, edge_index)
+            score = self._apply_score_polarity_adapter(score, edge_index)
+
+        # Ground-truth mask: evaluation / optional debug only (must not affect score path above).
+        y_eval = data.y.bool()
 
         if os.environ.get("FMGAD_POLARITY_DEBUG", "0") == "1":
             raw_cpu = raw_score.detach().cpu()
@@ -900,10 +1019,10 @@ class ResFlowGAD(BaseTransform):
                     float(final_cpu.max()),
                     float(final_cpu.mean()),
                     score_mode,
-                    float(eval_roc_auc(y, raw_cpu)),
-                    float(eval_roc_auc(y, final_cpu)),
-                    float(eval_roc_auc(y, -final_cpu)),
-                    float(eval_roc_auc(y, one_minus)),
+                    float(eval_roc_auc(y_eval, raw_cpu)),
+                    float(eval_roc_auc(y_eval, final_cpu)),
+                    float(eval_roc_auc(y_eval, -final_cpu)),
+                    float(eval_roc_auc(y_eval, one_minus)),
                 ),
                 flush=True,
             )
@@ -911,11 +1030,11 @@ class ResFlowGAD(BaseTransform):
         scores_cpu = score.detach().cpu()
         if torch.isnan(scores_cpu).any() or torch.isinf(scores_cpu).any():
             scores_cpu = torch.nan_to_num(scores_cpu, nan=0.0, posinf=0.0, neginf=0.0)
-        pyg_auc = eval_roc_auc(y, scores_cpu)
-        pyg_ap = eval_average_precision(y, scores_cpu)
-        pyg_rec = eval_recall_at_k(y, scores_cpu, sum(y))
-        pyg_prec = eval_precision_at_k(y, scores_cpu, sum(y))
-        p, r, _ = precision_recall_curve(y.numpy(), scores_cpu.numpy())
+        pyg_auc = eval_roc_auc(y_eval, scores_cpu)
+        pyg_ap = eval_average_precision(y_eval, scores_cpu)
+        pyg_rec = eval_recall_at_k(y_eval, scores_cpu, int(y_eval.sum()))
+        pyg_prec = eval_precision_at_k(y_eval, scores_cpu, int(y_eval.sum()))
+        p, r, _ = precision_recall_curve(y_eval.numpy(), scores_cpu.numpy())
         pyg_auprc = auc(r, p)
 
         if (pyg_prec + pyg_rec) > 0:
