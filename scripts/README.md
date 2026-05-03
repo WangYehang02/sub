@@ -1,12 +1,14 @@
-# Script Entrypoint Index
+# Scripts
 
-These wrappers are added for cleaner public structure and delegate to original scripts.
+## Reviewer-facing
 
-## Rule1
+| Script | Purpose |
+|--------|---------|
+| `run_single.py` | One dataset, one seed → trains and evaluates FMGAD. |
+| `run_all_5seeds.py` | Parallel driver for five datasets × multiple seeds; writes `results/main_runs/*.json`. |
+| `aggregate_results.py` | Collates run JSON files into CSV tables. |
+| `run_ablation.py` | Paper ablation variants (optional). |
 
-`python scripts/rule1/train.py` -> `rule1_code/main_train.py`
+## Development (not needed for main tables)
 
-## Rule2
-
-`python scripts/rule2/train.py` -> `rule2_code/main_train.py`
-`python scripts/rule2/eval_best.py` -> `rule2_code/run_best_eval.py`
+See `scripts/dev/` — tuning sweeps, smoke tests, plotting, and runtime comparison helpers.

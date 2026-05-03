@@ -32,7 +32,7 @@ def get_arguments():
     p.add_argument(
         "--config",
         type=str,
-        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "weibo_best.yaml"),
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "books.yaml"),
     )
     p.add_argument("--result-file", type=str, default=None)
     p.add_argument("--seed", type=int, default=42)

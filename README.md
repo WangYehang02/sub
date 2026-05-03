@@ -1,48 +1,73 @@
 # FMGAD
 
-Official PyTorch implementation accompanying our **NeurIPS** submission on **flow matching for graph anomaly detection**. This repository provides training, evaluation, and auxiliary scripts used to produce the empirical results reported in the paper.
+PyTorch implementation of **FMGAD** (flow matching for graph anomaly detection) for the NeurIPS supplementary code release.
 
-## Method at a glance
+## What this repository contains
 
-FMGAD combines a graph autoencoder with a **flow-matching** generative model over latent representations, together with optional prototype conditioning and score calibration. The core implementation lives in `model.py` (`ResFlowGAD`), with supporting modules for the autoencoder, encoder, flow-matching dynamics, and losses.
+- **Training and evaluation** entrypoint: `main_train.py` (wrapper CLI: `scripts/run_single.py`).
+- **Core model:** `model.py` (`ResFlowGAD`), with `auto_encoder.py`, `encoder.py`, `flow_matching_model.py`, `FMloss.py`, `utils.py`.
+- **Fixed configs:** `configs/{books,disney,enron,reddit,weibo}.yaml` for the five PyGOD benchmarks used in the paper.
 
-## Scope of this release
+## Install
 
-The artifact targets **five standard PyGOD benchmarks**: `books`, `disney`, `enron`, `reddit`, and `weibo`. Data are obtained through **PyGOD** (`pygod.utils.load_data`) on first use; no separate preprocessing pipeline is required for these datasets.
-
-## Requirements
-
-See `requirements.txt` for pinned dependencies. In brief: Python 3.8+ (tested with 3.8), PyTorch with CUDA, **PyTorch Geometric**, **PyGOD**, and common scientific Python stack. Install into a clean environment before running experiments.
-
-## Training and evaluation
-
-From the repository root:
+1. Install **PyTorch** for your CUDA/CPU setup: [https://pytorch.org/get-started/locally/](https://pytorch.org/get-started/locally/)
+2. Install **PyTorch Geometric** matching your Torch/CUDA: [https://pytorch-geometric.readthedocs.io/en/latest/notes/installation.html](https://pytorch-geometric.readthedocs.io/en/latest/notes/installation.html)
+3. Install Python dependencies:
 
 ```bash
-python main_train.py --config configs/<dataset>_best.yaml --device 0 --seed 42
+pip install -r requirements.txt
 ```
 
-Replace `<dataset>` with one of `books`, `disney`, `enron`, `reddit`, or `weibo`. Each `configs/*_best.yaml` file holds hyperparameters aligned with our reported runs. Optional flags include `--num_trial`, `--result-file`, `--deterministic`, and `--profile-efficiency`; see `main_train.py` for details.
+Python **3.8+** is supported (CI-style testing used 3.8).
 
-Metrics (e.g., ROC-AUC, AP) and timing are printed to stdout; `--result-file` writes a JSON summary suitable for aggregation.
+## Run (exact commands)
 
-## Configuration layout
+**One dataset, one seed**
 
-- `configs/` — per-dataset YAML files for FMGAD (`*_best.yaml`).
-- `configs/README.md` — short index of configuration conventions.
+```bash
+python scripts/run_single.py --dataset books --seed 42 --device 0
+```
 
-## Supplementary scripts
+**Five datasets × five seeds (parallel)**
 
-Under `scripts/` you will find utilities used for **ablation studies**, **strict runtime comparisons**, and **figure generation** (e.g., speedup and ablation plots). Invoke each script with `--help` for usage; paths are relative to the repository root unless noted otherwise.
+```bash
+python scripts/run_all_5seeds.py --datasets books,disney,enron,reddit,weibo --seeds 42,0,1,2,3 --gpus 0,1,2,3,4,5,6,7 --max-workers 8 --output-dir results/main_runs
+```
 
-## Documentation and reproducibility
+**Aggregate metrics to CSV**
 
-Additional materials for release hygiene and reproducibility checks live in `docs/` (e.g., command inventories and checklists). These files are provided to support reviewers and future open-source release; they do not alter training behavior.
+```bash
+python scripts/aggregate_results.py --input results/main_runs --output results/main_table.csv
+```
+
+**Optional ablations**
+
+```bash
+python scripts/run_ablation.py --help
+```
+
+Full step-by-step notes: [`docs/REPRODUCIBILITY.md`](docs/REPRODUCIBILITY.md).
+
+## Label usage / fairness
+
+See [`docs/FAIRNESS.md`](docs/FAIRNESS.md): labels are used **only for final evaluation metrics** (AUROC, AP, etc.), not for training objectives, polarity calibration, or adapter selection.
+
+## Layout
+
+| Path | Role |
+|------|------|
+| `configs/*.yaml` | Fixed per-dataset hyperparameters. |
+| `scripts/run_single.py` | Recommended CLI for a single experiment. |
+| `scripts/run_all_5seeds.py` | Batch driver for multi-seed tables. |
+| `scripts/aggregate_results.py` | CSV aggregation. |
+| `scripts/run_ablation.py` | Ablation protocol. |
+| `scripts/dev/` | Non-essential development utilities (tuning, plots, smoke tests). |
+| `docs/internal/` | Historical notes; **not** required for reproduction. |
 
 ## Citation
 
-If this code is useful, please cite the accompanying paper (bibtex will be added upon publication). Until then, you may reference this repository using the metadata in `CITATION.cff`.
+See `CITATION.cff`. BibTeX for the camera-ready paper will be added upon publication.
 
 ## License
 
-See `LICENSE` for terms of use.
+See `LICENSE`.

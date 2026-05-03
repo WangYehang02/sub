@@ -3,13 +3,12 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rulegad"
+name = "fmgad"
 version = "0.1.0"
-description = "RuleGAD research code scaffold"
-requires-python = ">=3.9"
-
-[tool.setuptools]
-package-dir = {"" = "src"}
+description = "FMGAD: flow matching for graph anomaly detection (PyTorch research code)"
+requires-python = ">=3.8"
+readme = "README.md"
+license = { text = "MIT" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
