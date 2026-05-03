@@ -12,6 +12,7 @@ use_score_smoothing: true
 use_virtual_neighbors: true
 weight: 0.0
 num_trial: 1
+# legacy_unused: mid-path smoothgnn / nk flip disabled; universal_no_y uses internal probes only
 smoothgnn_polarity: false
 smoothgnn_anchor_k_percent: 0.05
 smoothgnn_anchor_margin: 1.08
@@ -22,7 +23,7 @@ nk_degree_weight: 0.2
 nk_min_flip_gain: 0.035
 polarity_reg_weight: 0.2
 polarity_reg_target_corr: 0.2
-# universal polarity (grid search trial_36; replaces prior auto_vote block)
+# strict label-free universal polarity; uses graph/attribute proxy signals only
 polarity_adapter: universal_no_y
 polarity_unsup_proxy_q: 0.05
 polarity_use_local_probe: true

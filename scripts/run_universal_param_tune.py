@@ -2,6 +2,9 @@
 """
 在 seeds × 五数据集 上网格搜索 universal 极性 YAML 超参，目标：最大化 25 次运行的平均 AUROC。
 
+注意：排序目标为各次 main_train 写出的 auc_mean，该值由带标签的 eval_roc_auc 计算得到，
+属于「用评测标签做模型/后处理选参」；论文中需与「训练/极性路径无标签」分开披露。
+
 输出目录：results/universal_param_tune/<run_tag>/trial_XXXX/{dataset}_seed{s}.json
 并行：每个 (trial, dataset, seed) 为独立子进程，按 GPU 轮询分配。
 """
@@ -23,6 +26,43 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 DATASETS = ("books", "disney", "enron", "reddit", "weibo")
+
+
+def detect_idle_gpus(util_max: int = 10, mem_used_mib_max: int = 1024) -> List[str]:
+    """
+    用 nvidia-smi 选出「利用率与已用显存」均低于阈值的 GPU 索引（字符串列表）。
+    失败时返回空列表。
+    """
+    try:
+        r = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,utilization.gpu,memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return []
+    idle: List[str] = []
+    for line in r.stdout.strip().splitlines():
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) < 3:
+            continue
+        _idx_s, util_s, mem_s = parts[0], parts[1], parts[2]
+        try:
+            util = int(util_s)
+            mem_mib = int(mem_s)
+        except ValueError:
+            continue
+        if util <= util_max and mem_mib <= mem_used_mib_max:
+            idle.append(parts[0])
+    return idle
+
 
 UNIVERSAL_BASE: Dict[str, Any] = {
     "polarity_adapter": "universal_no_y",
@@ -162,13 +202,39 @@ def main() -> None:
     ap.add_argument("--seeds", type=str, default="42,0,1,2,3")
     ap.add_argument("--datasets", type=str, default=",".join(DATASETS))
     ap.add_argument("--gpus", type=str, default="0,1,2,3,4,5,6,7")
+    ap.add_argument(
+        "--idle-gpus-only",
+        action="store_true",
+        help="仅用 nvidia-smi 判定的空闲 GPU（见 --idle-gpu-util-max / --idle-gpu-mem-mib-max），忽略 --gpus。",
+    )
+    ap.add_argument("--idle-gpu-util-max", type=int, default=10, help="利用率 %% 不超过该值视为空闲。")
+    ap.add_argument("--idle-gpu-mem-mib-max", type=int, default=1024, help="已用显存 MiB 不超过该值视为空闲。")
     ap.add_argument("--max-workers", type=int, default=8)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     seeds = [int(x.strip()) for x in args.seeds.split(",") if x.strip()]
     dsets = [x.strip() for x in args.datasets.split(",") if x.strip()]
-    gpu_list = [g.strip() for g in args.gpus.split(",") if g.strip()]
+    if args.idle_gpus_only:
+        gpu_list = detect_idle_gpus(args.idle_gpu_util_max, args.idle_gpu_mem_mib_max)
+        print(
+            json.dumps(
+                {
+                    "idle_gpu_detection": {
+                        "util_max": args.idle_gpu_util_max,
+                        "mem_used_mib_max": args.idle_gpu_mem_mib_max,
+                        "gpus": gpu_list,
+                    }
+                },
+                indent=2,
+            ),
+            flush=True,
+        )
+        if not gpu_list:
+            print("ERROR: no idle GPUs found by nvidia-smi thresholds.", flush=True)
+            sys.exit(2)
+    else:
+        gpu_list = [g.strip() for g in args.gpus.split(",") if g.strip()]
     if not gpu_list:
         gpu_list = ["0"]
 

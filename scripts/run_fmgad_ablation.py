@@ -25,7 +25,11 @@ DATASET_CONFIG = {
 DEFAULT_SEEDS = [42, 0, 1, 2, 3]
 
 VARIANT_OVERRIDES = {
-    "full_fmgad": {},
+    "full_fmgad": {
+        "polarity_adapter": "universal_no_y",
+        "smoothgnn_polarity": False,
+        "nk_polarity": False,
+    },
     "wo_residual": {"residual_scale": 0.0},
     "wo_proto": {"use_proto": False},
     "wo_guidance": {"weight": 0.0},
@@ -103,10 +107,8 @@ def _sanity_variant_override(variant: str, cfg: Dict) -> None:
         raise RuntimeError(f"{variant}: inference_steps must be 1")
 
     if variant == "wo_polarity":
-        if bool(cfg.get("nk_polarity", True)) or bool(cfg.get("smoothgnn_polarity", True)):
-            raise RuntimeError("wo_polarity: polarity flags must be disabled")
-        if str(cfg.get("polarity_adapter", "nk")) in ("auto_vote", "universal", "universal_no_y"):
-            raise RuntimeError("wo_polarity: polarity_adapter cannot be auto_vote or universal / universal_no_y")
+        if str(cfg.get("polarity_adapter", "")).strip() != "none":
+            raise RuntimeError('wo_polarity: polarity_adapter must be "none" (no score polarity calibration)')
 
     if variant == "wo_proto" and bool(cfg.get("use_proto", True)):
         raise RuntimeError("wo_proto: use_proto must be False")
@@ -191,7 +193,7 @@ def _task_run(
     payload["seed"] = int(seed)
     payload["config_overrides"] = VARIANT_OVERRIDES[variant]
     payload["inference_steps"] = 1
-    payload["polarity_enabled"] = bool(merged_cfg.get("nk_polarity", False) or merged_cfg.get("smoothgnn_polarity", False))
+    payload["polarity_enabled"] = str(merged_cfg.get("polarity_adapter", "")).strip() == "universal_no_y"
     payload["smoothing_enabled"] = bool(merged_cfg.get("use_score_smoothing", False))
     payload["proto_enabled"] = bool(merged_cfg.get("use_proto", True))
     payload["residual_scale"] = float(merged_cfg.get("residual_scale", 10.0))

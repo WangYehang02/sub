@@ -1,4 +1,4 @@
-# 五数据集通用极性：polarity_adapter: universal_no_y（严格无标签 graph signals + 门控 + auto_vote 回退）
+# strict label-free universal polarity (universal_no_y): graph/attribute proxy signals + gated fusion; auto_vote only as internal fallback
 # 使用方式：复制本文件为 dataset 名，仅改首行 dataset / exp_tag，或训练时 --config 指向本文件。
 dataset: books
 exp_tag: universal_polarity_books
@@ -14,7 +14,7 @@ use_score_smoothing: true
 use_virtual_neighbors: true
 weight: 1.0
 num_trial: 1
-# 分数上不再叠 SmoothGNN / NK（与 time0501/clean gated 一致）；极性仅由 universal 内部探针完成
+# legacy_unused: YAML keys kept for compatibility; final path ignores mid-path smoothgnn/nk flip
 smoothgnn_polarity: false
 nk_polarity: false
 smoothgnn_anchor_k_percent: 0.05

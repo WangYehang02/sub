@@ -35,9 +35,6 @@ from utils import (
     compute_polarity_graph_signals_unsup,
     robust_zscore,
     robust_unit_interval,
-    calibrate_polarity_robust,
-    calibrate_polarity_with_neighbor_knowledge,
-    calibrate_polarity_auto_vote,
     calibrate_polarity_universal,
 )
 from flow_matching_model import MLPFlowMatching, FlowMatchingModel, sample_flow_matching, sample_flow_matching_free
@@ -170,7 +167,7 @@ class ResFlowGAD(BaseTransform):
         smoothgnn_anchor_k_percent: float = 0.05,
         smoothgnn_anchor_margin: float = 1.05,
         smoothgnn_robust_spearman_threshold: float = -0.1,
-        nk_polarity: bool = True,
+        nk_polarity: bool = False,
         nk_feature_weight: float = 0.8,
         nk_degree_weight: float = 0.2,
         nk_min_flip_gain: float = 0.02,
@@ -178,7 +175,7 @@ class ResFlowGAD(BaseTransform):
         score_mode_beta: float = 0.05,
         polarity_reg_weight: float = 0.0,
         polarity_reg_target_corr: float = 0.1,
-        polarity_adapter: str = "nk",
+        polarity_adapter: str = "universal_no_y",
         polarity_vote_q: float = 0.1,
         polarity_vote_margin: int = 1,
         polarity_min_confidence: float = 0.2,
@@ -236,7 +233,17 @@ class ResFlowGAD(BaseTransform):
         self.score_mode_beta = float(score_mode_beta)
         self.polarity_reg_weight = float(polarity_reg_weight)
         self.polarity_reg_target_corr = float(polarity_reg_target_corr)
-        self.polarity_adapter = str(polarity_adapter)
+        _pad = str(polarity_adapter).strip()
+        if _pad == "universal":
+            raise ValueError(
+                'polarity_adapter "universal" is no longer supported; use "universal_no_y" (strict label-free).'
+            )
+        if _pad not in ("universal_no_y", "none"):
+            raise ValueError(
+                f'polarity_adapter must be "universal_no_y" or "none", got {_pad!r}. '
+                'Legacy values "nk", "auto_vote", and "universal" are disabled in this submission build.'
+            )
+        self.polarity_adapter = _pad
         self.polarity_vote_q = float(polarity_vote_q)
         self.polarity_vote_margin = int(polarity_vote_margin)
         self.polarity_min_confidence = float(polarity_min_confidence)
@@ -280,34 +287,8 @@ class ResFlowGAD(BaseTransform):
         self.cos = nn.CosineSimilarity(dim=1, eps=1e-6)
         self.timesteps = 100
 
-    def _apply_rule2_auto_vote_polarity(self, score: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        if getattr(self, "polarity_adapter", "nk") != "auto_vote":
-            return score
-
-        if self._node_lcc is None or self._node_degree is None:
-            if self.polarity_verbose:
-                print("[auto_vote] missing LCC/degree cache, keep score.", flush=True)
-            return score
-
-        score2, flipped, diag = calibrate_polarity_auto_vote(
-            score,
-            edge_index,
-            self._node_lcc.to(score.device),
-            self._node_degree.to(score.device),
-            q=self.polarity_vote_q,
-            margin=self.polarity_vote_margin,
-            min_confidence=self.polarity_min_confidence,
-            lcc_rho_strong=self.polarity_lcc_rho_strong,
-            deg_rho_strong=self.polarity_deg_rho_strong,
-            connectivity_rel_gap=self.polarity_connectivity_rel_gap,
-            legacy_lcc_threshold=self.lcc_spearman_threshold,
-            verbose=self.polarity_verbose,
-        )
-        self._last_auto_vote_diag = diag
-        return score2
-
     def _apply_universal_polarity(self, score: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        if getattr(self, "polarity_adapter", "nk") not in ("universal", "universal_no_y"):
+        if getattr(self, "polarity_adapter", "universal_no_y") != "universal_no_y":
             return score
         if (
             self._node_lcc is None
@@ -355,12 +336,14 @@ class ResFlowGAD(BaseTransform):
         return score2
 
     def _apply_score_polarity_adapter(self, score: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        pa = getattr(self, "polarity_adapter", "nk")
-        if pa == "auto_vote":
-            return self._apply_rule2_auto_vote_polarity(score, edge_index)
-        if pa in ("universal", "universal_no_y"):
+        pa = getattr(self, "polarity_adapter", "universal_no_y")
+        if pa == "none":
+            return score
+        if pa == "universal_no_y":
             return self._apply_universal_polarity(score, edge_index)
-        return score
+        raise ValueError(
+            f'Unsupported polarity_adapter {pa!r}; submission build allows only "universal_no_y" or "none".'
+        )
 
     def _load_dataset(self, dset: str):
         """PyGOD 内置图异常检测数据集：books / disney / enron / reddit / weibo。"""
@@ -419,14 +402,10 @@ class ResFlowGAD(BaseTransform):
         self._smoothgnn_prior = None
         self._nk_prior = None
         self._last_universal_diag = None
-        _pa = getattr(self, "polarity_adapter", "nk")
-        if _pa in ("auto_vote", "universal", "universal_no_y"):
+        _pa = getattr(self, "polarity_adapter", "universal_no_y")
+        if _pa == "universal_no_y":
             self._node_lcc = compute_node_lcc_tensor(data.edge_index.detach().cpu(), data.x.size(0))
             self._node_degree = compute_node_degree_tensor(data.edge_index.detach().cpu(), data.x.size(0))
-        else:
-            self._node_lcc = None
-            self._node_degree = None
-        if _pa in ("universal", "universal_no_y"):
             self._polarity_graph_signals = compute_polarity_graph_signals_unsup(
                 data.edge_index.detach().cpu(),
                 data.x.detach().cpu(),
@@ -450,22 +429,14 @@ class ResFlowGAD(BaseTransform):
             else:
                 self._gated_nk_prior = None
         else:
+            self._node_lcc = None
+            self._node_degree = None
             self._polarity_graph_signals = None
             self._gated_local_prior = None
             self._gated_nk_prior = None
-        if getattr(self, "smoothgnn_polarity", False):
-            if self.verbose:
-                print("Precomputing local smoothness prior (||x - mean(neighbors)||)...", flush=True)
-            self._smoothgnn_prior = compute_smoothgnn_local_prior(data.x.cpu(), data.edge_index.cpu())
-        if getattr(self, "nk_polarity", False):
-            if self.verbose:
-                print("Precomputing neighbor-knowledge prior (feature + degree inconsistency)...", flush=True)
-            self._nk_prior = compute_neighbor_knowledge_prior(
-                data.x.cpu(),
-                data.edge_index.cpu(),
-                feature_weight=float(getattr(self, "nk_feature_weight", 0.8)),
-                degree_weight=float(getattr(self, "nk_degree_weight", 0.2)),
-            )
+        # Legacy YAML keys smoothgnn_polarity / nk_polarity are ignored on the submission path (no mid-path flip).
+        self._smoothgnn_prior = None
+        self._nk_prior = None
         if self.hid_dim is None:
             self.hid_dim = 2 ** int(math.log2(data.x.size(1)) - 1)
 
@@ -929,51 +900,14 @@ class ResFlowGAD(BaseTransform):
 
         raw_score = score_recon
         score = raw_score
-        smooth_flipped = False
-        nk_flipped = False
 
         if getattr(self, "use_score_smoothing", False) and edge_index.numel() > 0:
             score = _smooth_scores_by_graph(score, edge_index, self.score_smoothing_alpha, score.device)
 
-        if (
-            getattr(self, "polarity_adapter", "nk") not in ("auto_vote", "universal", "universal_no_y")
-            and getattr(self, "smoothgnn_polarity", False)
-            and getattr(self, "_smoothgnn_prior", None) is not None
-        ):
-            score, smooth_flipped = calibrate_polarity_robust(
-                score,
-                self._smoothgnn_prior.to(score.device),
-                k_percent=float(getattr(self, "smoothgnn_anchor_k_percent", 0.05)),
-                margin=float(getattr(self, "smoothgnn_anchor_margin", 1.05)),
-                spearman_threshold=float(getattr(self, "smoothgnn_robust_spearman_threshold", -0.1)),
-                verbose=bool(getattr(self, "verbose", False)),
-            )
-
-        if (
-            getattr(self, "polarity_adapter", "nk") not in ("auto_vote", "universal", "universal_no_y")
-            and getattr(self, "nk_polarity", False)
-            and getattr(self, "_nk_prior", None) is not None
-        ):
-            score, nk_flipped = calibrate_polarity_with_neighbor_knowledge(
-                score,
-                self._nk_prior.to(score.device),
-                k_percent=float(getattr(self, "smoothgnn_anchor_k_percent", 0.05)),
-                min_gain=float(getattr(self, "nk_min_flip_gain", 0.02)),
-                verbose=bool(getattr(self, "verbose", False)),
-            )
-
         score_mode = os.environ.get("FMGAD_SCORE_MODE", getattr(self, "score_mode", "calibrated"))
         beta = float(os.environ.get("FMGAD_SCORE_MODE_BETA", str(getattr(self, "score_mode_beta", 0.05))))
-        anchor = torch.zeros_like(score)
-        has_anchor = False
-        if getattr(self, "_smoothgnn_prior", None) is not None:
-            anchor = anchor + robust_unit_interval(self._smoothgnn_prior.to(score.device))
-            has_anchor = True
-        if getattr(self, "_nk_prior", None) is not None:
-            anchor = anchor + robust_unit_interval(self._nk_prior.to(score.device))
-            has_anchor = True
-        if not has_anchor:
-            anchor = robust_unit_interval(raw_score.detach())
+        # Legacy mid-path priors (_smoothgnn_prior / _nk_prior) are disabled; anchor uses reconstruction score only.
+        anchor = robust_unit_interval(raw_score.detach())
 
         raw_term = robust_zscore(raw_score.detach())
         if score_mode == "raw":
@@ -1008,13 +942,11 @@ class ResFlowGAD(BaseTransform):
             one_minus = 1.0 - final_norm
 
             print(
-                "[PolarityDebug] dset={} steps={} smooth_flipped={} nk_flipped={} "
+                "[PolarityDebug] dset={} steps={} "
                 "score[min,max,mean]=[{:.6f},{:.6f},{:.6f}] "
                 "mode={} auc_raw={:.6f} auc_final={:.6f} auc_neg={:.6f} auc_one_minus={:.6f}".format(
                     getattr(self, "dataset", "unknown"),
                     num_steps,
-                    smooth_flipped,
-                    nk_flipped,
                     float(final_cpu.min()),
                     float(final_cpu.max()),
                     float(final_cpu.mean()),

@@ -12,15 +12,16 @@ use_score_smoothing: true
 use_virtual_neighbors: false
 weight: 1.75
 num_trial: 1
-smoothgnn_polarity: true
+# legacy_unused: mid-path smoothgnn / nk flip disabled; universal_no_y uses internal probes only
+smoothgnn_polarity: false
 smoothgnn_anchor_k_percent: 0.05
 smoothgnn_anchor_margin: 1.08
 smoothgnn_robust_spearman_threshold: -0.15
-nk_polarity: true
+nk_polarity: false
 nk_feature_weight: 0.8
 nk_degree_weight: 0.2
 nk_min_flip_gain: 0.035
-# universal polarity (grid search trial_36, seeds 42,0,1,2,3)
+# strict label-free universal polarity; uses graph/attribute proxy signals only
 polarity_adapter: universal_no_y
 polarity_unsup_proxy_q: 0.05
 polarity_use_local_probe: true
