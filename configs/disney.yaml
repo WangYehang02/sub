@@ -8,7 +8,7 @@ flow_t_sampling: logit_normal
 hid_dim: null
 proto_alpha: 0.003
 residual_scale: 5.0
-sample_steps: 50
+sample_steps: 1
 use_score_smoothing: true
 use_virtual_neighbors: true
 weight: 2.5
